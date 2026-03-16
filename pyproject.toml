@@ -3,9 +3,10 @@ name = "terra-sat-drift"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "terratorch>=1.2.4",
+    "torchgeo>=0.7.0",
 ]
 
 [dependency-groups]
