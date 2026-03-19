@@ -216,3 +216,163 @@ class DriftPipeline:
             json.dump(experiment_results, handle, indent=2)
 
         print(f"\nSaved experiment results to: {output_file}")
+
+    def run_simulation_experiments(
+        self,
+        simulation_config,
+        raw_s2_source_dir: str | Path = "tiff_folder/raw_s2_cache",
+        simulated_output_dir: str | Path = "tiff_folder/simulated_dynamic",
+        comparison_pairs: list | None = None,
+    ) -> None:
+        """Execute drift analysis with on-the-fly Φ-sat-2 simulation from cached S2 data.
+
+        This workflow:
+        1. Loads raw S2 .tiff files from cache
+        2. Applies configurable simulation steps (radiance, PAN, misalignment, SNR, PSF)
+        3. Runs drift analysis comparing raw vs. simulated
+        4. Exports results to JSON with experiment metadata
+
+        Args:
+            simulation_config: SimulationConfig instance defining processing steps.
+            raw_s2_source_dir: Directory containing cached raw S2 L1C .tiff files.
+            simulated_output_dir: Directory to save simulated Φ-sat-2 outputs.
+            comparison_pairs: Optional list of (raw_file, simulated_file) tuples to analyze.
+                If None, performs batch analysis on all pairs.
+        """
+        from .simulation_pipeline import SimulationPipeline
+
+        sim_pipeline = SimulationPipeline(simulation_config)
+
+        print("\n" + "=" * 80)
+        print("STEP 1: Apply on-the-fly Φ-sat-2 simulation pipeline")
+        print("=" * 80)
+
+        sim_results = sim_pipeline.batch_simulate_from_source_dir(
+            source_dir=raw_s2_source_dir, pattern="*.tiff"
+        )
+
+        experiment_results: dict = {
+            "metadata": {
+                "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "simulation_steps": simulation_config.steps.as_dict(),
+                "raw_s2_source_dir": str(raw_s2_source_dir),
+                "simulated_output_dir": str(simulated_output_dir),
+                "simulation_successful": len(sim_results["successful"]),
+                "simulation_failed": len(sim_results["failed"]),
+            },
+            "simulation_results": sim_results,
+            "drift_analysis": {},
+        }
+
+        if not sim_results["successful"]:
+            print("⚠ No successful simulations. Skipping drift analysis.")
+            self._save_experiment_results(experiment_results, "simulation_only")
+            return
+
+        print("\n" + "=" * 80)
+        print("STEP 2: Analyze drift between raw and simulated pairs")
+        print("=" * 80)
+
+        # Build comparison pairs from simulation output if not provided
+        if comparison_pairs is None:
+            comparison_pairs = []
+            simulated_dir = Path(simulated_output_dir)
+            raw_dir = Path(raw_s2_source_dir)
+
+            for sim_file in sorted(simulated_dir.glob("simulated_*.tiff")):
+                # Extract original filename from "simulated_<original>" pattern
+                original_name = sim_file.name.replace("simulated_", "", 1)
+                raw_file = raw_dir / original_name
+                if raw_file.exists():
+                    comparison_pairs.append((raw_file, sim_file))
+
+        print(f"Analyzing {len(comparison_pairs)} raw-vs-simulated pairs...")
+
+        drift_results: list = []
+        for idx, (raw_file, sim_file) in enumerate(comparison_pairs, 1):
+            try:
+                drift = self.analyzer.analyze_drift_comprehensive(raw_file, sim_file)
+                self.report_printer.print_drift_report(drift, verbose=False)
+
+                drift_results.append(
+                    {
+                        "pair_index": idx,
+                        "raw_file": str(raw_file),
+                        "simulated_file": str(sim_file),
+                        "drift": drift,
+                    }
+                )
+                print(f"  ✓ Pair {idx}/{len(comparison_pairs)}: {raw_file.name}")
+            except Exception as exc:
+                print(f"  ✗ Pair {idx}/{len(comparison_pairs)}: {raw_file.name} - {exc}")
+
+        # Aggregate statistics
+        print("\n" + "=" * 80)
+        print("STEP 3: Aggregate drift statistics")
+        print("=" * 80)
+
+        if drift_results:
+            # Extract embedding-level metrics
+            embedding_sims = [
+                r["drift"].get("embedding_comparison", {}).get("cosine_similarity", 0)
+                for r in drift_results
+                if "embedding_comparison" in r["drift"]
+            ]
+            avg_embedding_sim = (
+                sum(embedding_sims) / len(embedding_sims) if embedding_sims else None
+            )
+
+            # Extract classification metrics
+            class_flip_rate = None
+            avg_prob_change = None
+            if drift_results[0]["drift"].get("classification_comparison"):
+                class_results = [
+                    r["drift"].get("classification_comparison", {}) for r in drift_results
+                ]
+                flips = sum(1 for cr in class_results if cr.get("class_flipped"))
+                class_flip_rate = flips / len(class_results) if class_results else 0
+                prob_changes = [
+                    cr.get("probability_change_magnitude", 0) for cr in class_results
+                ]
+                avg_prob_change = (
+                    sum(prob_changes) / len(prob_changes) if prob_changes else 0
+                )
+
+            summary = {
+                "total_pairs_analyzed": len(drift_results),
+                "avg_embedding_cosine_similarity": avg_embedding_sim,
+                "class_flip_rate": class_flip_rate,
+                "avg_probability_change": avg_prob_change,
+            }
+
+            print(f"Total pairs analyzed: {summary['total_pairs_analyzed']}")
+            if avg_embedding_sim is not None:
+                print(f"Average embedding cosine similarity: {avg_embedding_sim:.4f}")
+            if class_flip_rate is not None:
+                print(f"Class flip rate: {class_flip_rate:.2%}")
+            if avg_prob_change is not None:
+                print(f"Average probability change: {avg_prob_change:+.4f}")
+
+            experiment_results["drift_analysis"] = {
+                "summary": summary,
+                "detailed_results": drift_results,
+            }
+
+        self._save_experiment_results(experiment_results, "simulation_with_analysis")
+
+    def _save_experiment_results(self, results: dict, experiment_type: str) -> None:
+        """Save experiment results to timestamped JSON file.
+
+        Args:
+            results: Dictionary of results to save.
+            experiment_type: Experiment label for filename.
+        """
+        output_dir = Path("experiments")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_file = output_dir / f"drift_results_{experiment_type}_{timestamp}.json"
+
+        with output_file.open("w", encoding="utf-8") as handle:
+            json.dump(results, handle, indent=2)
+
+        print(f"\nSaved experiment results to: {output_file}")
