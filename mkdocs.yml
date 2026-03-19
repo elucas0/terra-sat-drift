@@ -1,0 +1,13 @@
+site_name: TerraSat Drift
+site_description: Drift analysis experiments for TerraMind backbones on Earth observation TIFFs.
+repo_name: elucas0/terra-sat-drift
+
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - CLI Reference: cli-reference.md
+  - Experiment Tracking: experiments.md
+  - Results JSON Format: results-json-format.md
