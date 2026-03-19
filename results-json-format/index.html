@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Results JSON Format - TerraSat Drift</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Results JSON Format";
+        var mkdocs_page_input_path = "results-json-format.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> TerraSat Drift
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../getting-started/">Getting Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli-reference/">CLI Reference</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../experiments/">Experiment Tracking</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Results JSON Format</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#metadata">metadata</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example_1-single-pair-detailed-analysis">example_1 (single pair detailed analysis)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example_2-folder-embedding-summary">example_2 (folder embedding summary)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example_3-folder-classification-summary">example_3 (folder classification summary)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#backward-compatibility">Backward Compatibility</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">TerraSat Drift</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Results JSON Format</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="results-json-format">Results JSON Format</h1>
+<p>Each run exports a single JSON document with this top-level layout:</p>
+<pre><code class="language-json">{
+  &quot;metadata&quot;: { &quot;...&quot;: &quot;...&quot; },
+  &quot;example_1&quot;: { &quot;...&quot;: &quot;...&quot; },
+  &quot;example_2&quot;: { &quot;...&quot;: &quot;...&quot; },
+  &quot;example_3&quot;: { &quot;...&quot;: &quot;...&quot; }
+}
+</code></pre>
+<h2 id="metadata"><code>metadata</code></h2>
+<ul>
+<li><code>timestamp_utc</code>: export timestamp.</li>
+<li><code>embedding_raw_dir</code>, <code>embedding_simulated_dir</code>.</li>
+<li><code>classification_raw_dir</code>, <code>classification_simulated_dir</code>.</li>
+<li><code>file1_pattern</code>, <code>file2_pattern</code>.</li>
+<li><code>suffix</code>.</li>
+</ul>
+<h2 id="example_1-single-pair-detailed-analysis"><code>example_1</code> (single pair detailed analysis)</h2>
+<ul>
+<li><code>status</code>: <code>ok</code> or <code>skipped</code>.</li>
+<li><code>raw_file</code>, <code>simulated_file</code>.</li>
+<li><code>drift</code> (when status is <code>ok</code>):</li>
+<li><code>spectral_drift</code> (per-band stats and summary)</li>
+<li><code>embedding_drift</code> (similarity and error metrics)</li>
+<li><code>class_drift</code> (class prediction stability)</li>
+</ul>
+<h2 id="example_2-folder-embedding-summary"><code>example_2</code> (folder embedding summary)</h2>
+<p>Current format stores summary metrics only:</p>
+<ul>
+<li><code>status</code></li>
+<li><code>pairs_processed</code></li>
+<li><code>avg_cosine_similarity</code></li>
+<li><code>avg_mse_error</code></li>
+<li><code>avg_mae_error</code></li>
+<li><code>avg_pixel_max_diff</code></li>
+<li><code>per_layer_avg_cosine_similarity</code> (array)</li>
+</ul>
+<h2 id="example_3-folder-classification-summary"><code>example_3</code> (folder classification summary)</h2>
+<ul>
+<li><code>status</code></li>
+<li><code>pairs_processed</code></li>
+<li><code>class_flip_analysis</code>:</li>
+<li><code>total_pairs</code></li>
+<li><code>class_flips_count</code></li>
+<li><code>class_flip_rate</code></li>
+<li><code>avg_probability_change</code></li>
+<li><code>max_probability_change</code></li>
+<li><code>avg_top3_consistency</code></li>
+</ul>
+<h2 id="backward-compatibility">Backward Compatibility</h2>
+<p>Some older files can include verbose per-file arrays under <code>example_2.results</code> or <code>example_3.results</code>. Consumers should ignore unknown fields and prefer summary keys when present.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../experiments/" class="btn btn-neutral float-left" title="Experiment Tracking"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="None" class="fa fa-code-fork" style="color: #fcfcfc"> elucas0/terra-sat-drift</a>
+        </span>
+    
+    
+      <span><a href="../experiments/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
