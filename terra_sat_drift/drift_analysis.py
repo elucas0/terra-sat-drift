@@ -222,11 +222,18 @@ class DriftAnalyzer:
             ],
         }
 
-    def compare_directory(self, raw_dir: Path, simulated_dir: Path, suffix: str = ".tiff") -> list[dict]:
+    def compare_directory(
+        self,
+        raw_dir: Path,
+        simulated_dir: Path,
+        file1_pattern: str = "BANDS_RES-GRID",
+        file2_pattern: str = "PHISAT2-BANDS-GRID",
+        suffix: str = ".tiff",
+    ) -> list[dict]:
         """Compute embedding stability metrics for all matched files in two folders."""
         results = []
         for raw_path in sorted(raw_dir.glob(f"*{suffix}")):
-            sim_name = raw_path.name.replace("BANDS_RES-GRID", "PHISAT2-BANDS-GRID")
+            sim_name = raw_path.name.replace(file1_pattern, file2_pattern)
             sim_path = simulated_dir / sim_name
 
             if not sim_path.exists():
