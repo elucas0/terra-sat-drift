@@ -4,63 +4,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Any, TYPE_CHECKING
+from typing import Optional
 from datetime import datetime
 import numpy as np
 import sys
 
-# Add phisat-2 directory to path for imports
-PHISAT2_PATH = Path(__file__).parent.parent / "phisat-2"
-if PHISAT2_PATH.exists():
-    sys.path.insert(0, str(PHISAT2_PATH))
-
-# Conditional imports for phisat2 integration
-EOLEARN_AVAILABLE = False
-PHISAT2_UTILS_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from eolearn.core.eodata import EOPatch
-    from eolearn.core.constants import FeatureType
-    from phisat2_utils import (  # type: ignore
-        AddPANBandTask,  # type: ignore
-        BandMisalignmentTask,  # type: ignore
-        CalculateRadianceTask,  # type: ignore
-        CalculateReflectanceTask,  # type: ignore
-        AlternativePhisatCalculationTask,  # type: ignore
-    )
-    from phisat2_constants import ProcessingLevels  # type: ignore
-else:
-    EOPatch = None
-    FeatureType = None
-    AddPANBandTask = None
-    BandMisalignmentTask = None
-    CalculateRadianceTask = None
-    CalculateReflectanceTask = None
-    AlternativePhisatCalculationTask = None
-    ProcessingLevels = None
-
-try:
-    from eolearn.core.eodata import EOPatch
-    from eolearn.core.constants import FeatureType
-    EOLEARN_AVAILABLE = True
-except ImportError:
-    EOLEARN_AVAILABLE = False
-
-# Import phisat2_utils tasks
-try:
-    if EOLEARN_AVAILABLE:
-        from phisat2_utils import (  # type: ignore
-            AddPANBandTask,  # type: ignore
-            BandMisalignmentTask,  # type: ignore
-            CalculateRadianceTask,  # type: ignore
-            CalculateReflectanceTask,  # type: ignore
-            AlternativePhisatCalculationTask,  # type: ignore
-        )
-        from phisat2_constants import ProcessingLevels  # type: ignore
-        PHISAT2_UTILS_AVAILABLE = True
-except ImportError:
-    PHISAT2_UTILS_AVAILABLE = False
-
+from eolearn.core.eodata import EOPatch
+from eolearn.core.constants import FeatureType
+from phisat2_utils import (  
+    AddPANBandTask,  
+    BandMisalignmentTask,  
+    CalculateRadianceTask,  
+    CalculateReflectanceTask,  
+    AlternativePhisatCalculationTask,
+)
+from phisat2_constants import ProcessingLevels  
+from eolearn.core.eodata import EOPatch
+from eolearn.core.constants import FeatureType
 
 class SimulationPipeline:
     """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
@@ -77,12 +37,6 @@ class SimulationPipeline:
         Args:
             config: SimulationConfig instance defining processing steps and parameters.
         """
-        if not PHISAT2_UTILS_AVAILABLE:
-            raise ImportError(
-                "phisat2_utils and eolearn are required for simulation pipeline. "
-                "Ensure phisat-2/ directory is accessible."
-            )
-        
         self.config = config
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
 
