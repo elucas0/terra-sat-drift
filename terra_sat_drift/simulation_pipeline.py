@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
 import numpy as np
-import sys
 
 from eolearn.core.eodata import EOPatch
 from eolearn.core.constants import FeatureType
-from phisat2_utils import (  
+from .phisat2_utils import (  
     AddPANBandTask,  
     BandMisalignmentTask,  
     CalculateRadianceTask,  
     CalculateReflectanceTask,  
     AlternativePhisatCalculationTask,
 )
-from phisat2_constants import ProcessingLevels  
-from eolearn.core.eodata import EOPatch
-from eolearn.core.constants import FeatureType
+from .phisat2_constants import ProcessingLevels  
 
 class SimulationPipeline:
     """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
