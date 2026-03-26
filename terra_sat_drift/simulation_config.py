@@ -43,6 +43,7 @@ class SimulationConfig:
 
     # Processing parameters
     phisat2_exec_path: Optional[str] = None  # Path to phisat2 binary if using SNR/PSF tasks
+    sh_config_path: Optional[str] = None  # Path to Sentinel Hub config for metadata fetching
     cell_size: int = 256
     grid_overlap: float = 0.0
     processing_level: str = "L1C"  # L1A, L1B, or L1C

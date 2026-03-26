@@ -28,7 +28,7 @@ class TerraMindClassifier:
     def __init__(
         self,
         num_classes: int = 10,
-        backbone_size: str = "large",
+        backbone_size: str = "base",
         device: torch.device | None = None,
     ) -> None:
         """Build the TerraMind-backed classification model.

@@ -14,7 +14,7 @@ import shapely.ops
 from cv2 import warpAffine
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from .phisat2_constants import (
+from phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,
@@ -39,8 +39,8 @@ from sentinelhub.aws.request import AwsProductRequest
 
 
 class AlternativePhisatCalculationTask(EOTask):
-    KERNEL_BANDS = ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"]
-    SNR_BANDS = ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"]
+    KERNEL_BANDS = ["B1", "B2", "B3", "B7", "B4", "B5", "B6"]
+    SNR_BANDS = ["B02", "B03", "B04", "B08", "B05", "B06", "B07"]
 
     def __init__(
         self,
