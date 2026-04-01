@@ -1,8 +1,10 @@
 import os
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import convolve
 
@@ -14,7 +16,7 @@ import shapely.ops
 from cv2 import warpAffine
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from phisat2_constants import (
+from .phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,
@@ -35,12 +37,15 @@ from sentinelhub import (
     parse_time,
     pixel_to_utm,
 )
-from sentinelhub.aws.request import AwsProductRequest
+import requests
+import pandas as pd
+from sunpy.coordinates import sun
+from astropy import units as u
 
 
 class AlternativePhisatCalculationTask(EOTask):
-    KERNEL_BANDS = ["B1", "B2", "B3", "B7", "B4", "B5", "B6"]
-    SNR_BANDS = ["B02", "B03", "B04", "B08", "B05", "B06", "B07"]
+    KERNEL_BANDS = ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"]
+    SNR_BANDS = ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"]
 
     def __init__(
         self,
@@ -207,9 +212,11 @@ class AddMetadataTask(EOTask):
         available_dates = []
         for tile in tiles:
             tile_dt = parse_time(tile["properties"]["datetime"], ignoretz=True)
-            if (tile_dt in timestamps) and not (tile_dt.date() in available_dates):
+            # Handle both datetime and date objects
+            tile_date = tile_dt.date() if hasattr(tile_dt, 'date') else tile_dt
+            if (tile_dt in timestamps) and not (tile_date in available_dates):
                 tile["timestamp"] = tile_dt
-                available_dates.append(tile_dt.date())
+                available_dates.append(tile_date)
                 filtered_tiles.append(tile)
         if len(filtered_tiles) != len(timestamps):
             raise ValueError(
@@ -223,49 +230,228 @@ class AddMetadataTask(EOTask):
                 "AddMetadataTask needs eopatch to have bbox and temporal data!"
             )
 
-        # the metadata info location has been changed since 2022-01-25
-        catalog = SentinelHubCatalog(self.config)
-        query = catalog.search(
-            collection=DataCollection.SENTINEL2_L2A,
-            bbox=eopatch.bbox,
-            time=[eopatch.timestamp[0], eopatch.timestamp[-1]],
-        )
-        tiles = self.filter_and_sort_tiles(list(query), eopatch.timestamp)
+        # Query Copernicus catalogue for Sentinel-2 L2A products
+        sensor = "SENTINEL-2"
+        bbox = eopatch.bbox
+        
+        # Convert bbox to WGS84 polygon string (minx, miny, maxx, maxy)
+        area = f"POLYGON(({bbox.min_x} {bbox.min_y},{bbox.min_x} {bbox.max_y},{bbox.max_x} {bbox.max_y},{bbox.max_x} {bbox.min_y},{bbox.min_x} {bbox.min_y}))"
+        
+        start_date = eopatch.timestamp[0].strftime("%Y-%m-%d")
+        end_date = eopatch.timestamp[-1].strftime("%Y-%m-%d")
+        prod_type = "S2MSI2A"
 
+        # Build OData query for Copernicus catalogue
+        query_url = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '"+sensor+"' \
+            and OData.CSC.Intersects(area=geography'SRID=4326;"+area+"') \
+            and ContentDate/Start gt "+start_date+"T00:00:00.000Z \
+            and ContentDate/Start lt "+end_date+"T23:59:59.000Z \
+            and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' \
+            and att/OData.CSC.StringAttribute/Value eq '"+prod_type+"')"
+
+        # Fetch all products from Copernicus catalogue
+        json_out = requests.get(query_url).json()
+        products_list = json_out.get('value', [])
+
+        # Handle pagination
+        next_link = json_out.get('@odata.nextLink', None)
+        while next_link:
+            json_next = requests.get(next_link).json()
+            products_list.extend(json_next.get('value', []))
+            next_link = json_next.get('@odata.nextLink', None)
+
+        # Initialize scalar fields
         dim = len(eopatch.timestamp)
         eopatch.scalar["earth_sun_dist"] = np.ones((dim, 1))
         for s2_band in S2_BANDS:
             eopatch.scalar[f"sol_irr_{s2_band}"] = np.ones((dim, 1))
 
-        for tile_idx, (tile, timestamp) in enumerate(zip(tiles, eopatch.timestamp)):
-            metadata = AwsProductRequest(
-                product_id=tile["id"], bands=[], metafiles=["metadata"]
-            ).get_data()
+        # Extract metadata from each product
+        for tile_idx, (tile, timestamp) in enumerate(zip(products_list, eopatch.timestamp)):
+            metadata = self._fetch_metadata_from_copernicus(tile)
 
-            index_refl_conversion = 4
-            if timestamp >= datetime.strptime("2022-01-25", "%Y-%m-%d"):
-                index_refl_conversion = 5
+            # Extract Earth-Sun distance and solar irradiance from metadata
+            earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp)
+            
+            eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
 
-            assert (
-                metadata[0][0][1][index_refl_conversion][0].tag == "U"
-            ), "Issue indexing metadata"
-            assert (
-                metadata[0][0][1][index_refl_conversion][1].tag
-                == "Solar_Irradiance_List"
-            ), "Issue indexing metadata"
+            # Populate solar irradiance for each band
+            for s2_band in S2_BANDS:
+                if s2_band in solar_irradiances:
+                    eopatch.scalar[f"sol_irr_{s2_band}"][tile_idx] = solar_irradiances[s2_band]
 
-            eopatch.scalar["earth_sun_dist"][tile_idx] = float(
-                metadata[0][0][1][index_refl_conversion][0].text
-            )
-
-            solar_irradiance_list = metadata[0][0][1][index_refl_conversion][1]
-            for s2_idx, s2_band in enumerate(DataCollection.SENTINEL2_L1C.bands):
-                if s2_band.name in S2_BANDS:
-                    eopatch.scalar[f"sol_irr_{s2_band.name}"][tile_idx] = float(
-                        solar_irradiance_list[s2_idx].text
-                    )
+        # Extract and add sun zenith angles from metadata
+        for tile_idx, tile in enumerate(products_list):
+            safe_path = tile.get("S3Path", "").rstrip("/")
+            sun_zenith_angles = self._parse_sun_zenith_angles(safe_path)
+            # Add sun zenith angles to the data feature on first occurrence
+            # Get target shape from existing band data
+            for feature in eopatch.data.keys():
+                if eopatch[FeatureType.DATA, feature].ndim == 4:
+                    target_h, target_w = eopatch[FeatureType.DATA, feature].shape[1:3]
+                    # Resize to match band resolution
+                    sun_zenith_angles = cv2.resize(sun_zenith_angles, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                    break
+                        
+                # Add to eopatch with proper 4D shape (time, height, width, channels)
+            eopatch[FeatureType.DATA, "sunZenithAngles"] = sun_zenith_angles[np.newaxis, :, :, np.newaxis]
+            break
 
         return eopatch
+
+    @staticmethod
+    def _fetch_metadata_from_copernicus(product: Dict) -> Dict:
+        """Fetch metadata for a product using the complete S3 path from Copernicus API.
+        
+        :param product: Product dictionary from Copernicus API
+        :return: Metadata dictionary with XML root and product info
+        """
+        # Get the complete S3 path from the product
+        s3_path = product.get("S3Path", "")
+        product_id = product.get("Id", "")
+        
+        if not s3_path:
+            raise ValueError(f"No S3Path found for product {product_id}")
+        
+        local_safe_path = s3_path.rstrip("/")
+        
+        if not os.path.exists(local_safe_path):
+            raise FileNotFoundError(
+                f"SAFE product not found at {local_safe_path} for product {product_id}"
+            )
+        
+        # Construct the metadata file path
+        metadata_file = os.path.join(local_safe_path, "MTD_MSIL2A.xml")
+        if not os.path.exists(metadata_file):
+            # Try L1C metadata file instead
+            metadata_file = os.path.join(local_safe_path, "MTD_MSIL1C.xml")
+        
+        if not os.path.exists(metadata_file):
+            raise FileNotFoundError(
+                f"Metadata file not found at {local_safe_path} (tried MTD_MSIL2A.xml and MTD_MSIL1C.xml)"
+            )
+        
+        # Parse the XML file
+        tree = ET.parse(metadata_file)
+        root = tree.getroot()
+        
+        metadata_info = {
+            "product_id": product_id,
+            "safe_path": local_safe_path,
+            "xml_root": root,
+            "product": product
+        }
+        
+        return metadata_info
+
+    @staticmethod
+    def _extract_irradiance_data(metadata: Dict, timestamp: datetime) -> Tuple[float, Dict[str, float]]:
+        """Extract Earth-Sun distance and solar irradiance from Sentinel-2 metadata XML.
+        
+        :param metadata: Metadata dictionary containing XML root and product info
+        :param timestamp: Timestamp of the product
+        :return: Tuple of (earth_sun_distance, solar_irradiances_dict)
+        """
+        xml_root = metadata.get("xml_root")
+        if not xml_root:
+            raise ValueError("No XML root found in metadata dictionary")
+        
+        # Calculate Earth-Sun distance using sunpy
+        earth_sun_dist = sun.earth_distance(timestamp).to(u.au).value
+        
+        solar_irradiances = {}
+        
+        # Extract solar irradiance from Solar_Irradiance_List
+        band_id_to_band = {
+            0: "B01", 1: "B02", 2: "B03", 3: "B04", 4: "B05", 5: "B06", 6: "B07", 7: "B08"
+        }
+        
+        irradiance_list = xml_root.find(".//Solar_Irradiance_List")
+        if irradiance_list is not None:
+            for irradiance_elem in irradiance_list.findall("SOLAR_IRRADIANCE"):
+                band_id = irradiance_elem.get("bandId")
+                if band_id is not None:
+                    try:
+                        band_id_int = int(band_id)
+                        irradiance_value = float(irradiance_elem.text)
+                        if band_id_int in band_id_to_band:
+                            solar_irradiances[band_id_to_band[band_id_int]] = irradiance_value
+                    except (ValueError, TypeError):
+                        pass
+        
+        # Use standard reference values if extraction failed
+        if not solar_irradiances:
+            print('Could not extract solar irradiance from metadata, using standard reference values for all bands.')
+            solar_irradiances = {
+                "B1": 1895.0,   # Coastal aerosol
+                "B2": 1941.0,   # Blue
+                "B3": 1822.0,   # Green
+                "B4": 1610.0,   # Red
+                "B5": 1519.0,   # Vegetation Red Edge
+                "B6": 1447.0,   # Vegetation Red Edge
+                "B7": 1387.0,   # Vegetation Red Edge
+                "B8": 1034.0,   # NIR
+                "B8A": 955.0,   # Vegetation Red Edge
+                "B11": 245.0,   # SWIR
+                "B12": 85.0,    # SWIR
+            }
+        
+        return earth_sun_dist, solar_irradiances
+
+    @staticmethod
+    def _parse_sun_zenith_angles(safe_path: str) -> Optional[np.ndarray]:
+        """Extract sun zenith angles from MTD_TL.xml file in SAFE product.
+        
+        :param safe_path: Path to the SAFE product directory
+        :return: 2D array of sun zenith angles or None if extraction fails
+        """
+        try:
+            # Find MTD_TL.xml in GRANULE subdirectory
+            granule_dir = os.path.join(safe_path, "GRANULE")
+            if not os.path.exists(granule_dir):
+                print(f"GRANULE directory not found in {safe_path}")
+                return None
+            
+            # Get the first tile directory (assuming there's one)
+            tile_dirs = [d for d in os.listdir(granule_dir) if os.path.isdir(os.path.join(granule_dir, d))]
+            if not tile_dirs:
+                print(f"No tile directories found in {granule_dir}")
+                return None
+            
+            mtd_tl_path = os.path.join(granule_dir, tile_dirs[0], "MTD_TL.xml")
+            if not os.path.exists(mtd_tl_path):
+                print(f"MTD_TL.xml not found at {mtd_tl_path}")
+                return None
+            
+            # Parse XML
+            tree = ET.parse(mtd_tl_path)
+            root = tree.getroot()
+            
+            # Extract sun zenith angles from Sun_Angles_Grid
+            zenith_grid = root.find(".//Sun_Angles_Grid/Zenith")
+            if zenith_grid is None:
+                print("Zenith element not found in Sun_Angles_Grid")
+                return None
+            
+            values_list = zenith_grid.find("Values_List")
+            if values_list is None:
+                print("Values_List element not found in Zenith grid")
+                return None
+            
+            values_rows = []
+            for values_elem in values_list.findall("VALUES"):
+                if values_elem.text:
+                    row_values = [float(v) for v in values_elem.text.strip().split()]
+                    values_rows.append(row_values)
+            
+            # Convert to numpy array
+            sun_zenith_angles = np.array(values_rows)
+            
+            return sun_zenith_angles
+            
+        except Exception as e:
+            print(f"Error parsing sun zenith angles: {str(e)}")
+            return None
 
 
 def get_shifts_l1a() -> List[Tuple[float, float]]:

@@ -6,6 +6,8 @@ from .pipeline import DriftPipeline
 from .reporting import DriftReportPrinter
 from .simulation_config import SimulationConfig, SimulationSteps
 from .simulation_pipeline import SimulationPipeline
+from .sen1floods11_loader import Sen1Floods11S2Loader
+
 
 __all__ = [
     "DriftAnalyzer",
@@ -15,4 +17,5 @@ __all__ = [
     "SimulationConfig",
     "SimulationSteps",
     "SimulationPipeline",
+    "Sen1Floods11S2Loader",
 ]

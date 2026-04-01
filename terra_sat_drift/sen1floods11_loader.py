@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 from typing import Optional, List, Tuple
 import numpy as np
-import pandas as pd
 import rasterio
+import json
+
 
 
 class Sen1Floods11S2Loader:
@@ -181,3 +182,19 @@ class Sen1Floods11S2Loader:
                 continue
 
         return batch
+
+    def load_geojson_metadata(self):
+        """Load and return the Sen1Floods11 metadata GeoJSON.
+
+        Returns:
+            dict: Parsed GeoJSON metadata.
+            
+        Raises:
+            FileNotFoundError: If metadata file not found.
+            ImportError: If geopandas required but not available.
+        """
+        if not self.metadata_file.exists():
+            raise FileNotFoundError(f"Metadata file not found: {self.metadata_file}")
+
+        with open(self.metadata_file) as f:
+            return json.load(f)

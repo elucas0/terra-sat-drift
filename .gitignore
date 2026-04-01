@@ -209,4 +209,4 @@ __marimo__/
 tiff_folder
 experiments
 datasets
-sh_config.json
+*.bin

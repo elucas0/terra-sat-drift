@@ -221,8 +221,9 @@ class DriftPipeline:
         self,
         simulation_config,
         raw_s2_source_dir: str | Path = "tiff_folder/raw_s2_cache",
-        simulated_output_dir: str | Path = "tiff_folder/simulated_dynamic",
+        simulated_output_dir: str | Path = "tiff_folder/simulated_s2",
         comparison_pairs: list | None = None,
+        metadata_path: str | None = None,
     ) -> None:
         """Execute drift analysis with on-the-fly Φ-sat-2 simulation from cached S2 data.
 
@@ -238,6 +239,7 @@ class DriftPipeline:
             simulated_output_dir: Directory to save simulated Φ-sat-2 outputs.
             comparison_pairs: Optional list of (raw_file, simulated_file) tuples to analyze.
                 If None, performs batch analysis on all pairs.
+            metadata_path: Optional path to Sen1Floods metadata GeoJSON for acquisition date extraction.
         """
         from .simulation_pipeline import SimulationPipeline
 
@@ -248,7 +250,7 @@ class DriftPipeline:
         print("=" * 80)
 
         sim_results = sim_pipeline.batch_simulate_from_source_dir(
-            source_dir=raw_s2_source_dir, pattern="*.tiff"
+            source_dir=raw_s2_source_dir, pattern="*.tiff", metadata_path=metadata_path
         )
 
         experiment_results: dict = {
