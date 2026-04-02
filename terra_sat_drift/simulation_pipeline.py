@@ -10,6 +10,8 @@ import json
 import rasterio
 from scipy.ndimage import gaussian_filter
 import cv2
+import numpy as np
+from skimage.transform import resize
 
 from sentinelhub.geometry import BBox
 from sentinelhub.constants import CRS
@@ -18,11 +20,11 @@ from eolearn.core.eodata import EOPatch
 from eolearn.core.constants import FeatureType
 from eolearn.core.core_tasks import MapFeatureTask
 from eolearn.features.utils import spatially_resize_image as resize_images
-from .simulation_config import SimulationConfig
+from simulation_config import SimulationConfig, SimulationSteps
 
 from tqdm import tqdm
 from tqdm import tqdm
-from .phisat2_utils import (  
+from phisat2_utils import (  
     AddPANBandTask,  
     AddMetadataTask,
     BandMisalignmentTask,  
@@ -31,7 +33,7 @@ from .phisat2_utils import (
     AlternativePhisatCalculationTask,
     PhisatCalculationTask,
 )
-from .phisat2_constants import PHISAT2_RESOLUTION, ProcessingLevels  
+from phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
 
 class SimulationPipeline:
     """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
@@ -123,6 +125,12 @@ class SimulationPipeline:
                         date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
                         location = properties.get("location", "Unknown")
                         return date_obj
+                elif location_property == "cambodia" and location_name == "mekong":
+                    # Special case for Cambodia where location name is inconsistent
+                    s2_date_str = properties.get("s2_date")
+                    if s2_date_str:
+                        date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
+                        return date_obj
             print(f"Warning: No matching metadata found for this location: {location_name}")
             return None
         except Exception as e:
@@ -165,8 +173,14 @@ class SimulationPipeline:
             band_indices = [1, 2, 3, 7, 4, 5, 6]
             s2_data = s2_data[band_indices, :, :]
             
+            TARGET_10M_SIZE = (512, 512)
+            if s2_data.shape[1:] != TARGET_10M_SIZE:
+                s2_data = resize(s2_data, (len(band_indices), *TARGET_10M_SIZE), 
+                                order=1, preserve_range=True, anti_aliasing=True)
+            
             # Transpose from (bands, height, width) to (height, width, bands)
             s2_data = np.transpose(s2_data, (1, 2, 0))
+            print(f"Loaded S2 data with shape {s2_data.shape}")
             
             # Create EOPatch
             eopatch = EOPatch(bbox=bbox)
@@ -223,7 +237,7 @@ class SimulationPipeline:
                     FeatureType.DATA: [current_feature],
                 }
             
-            NEW_SIZE = (int(eopatch.data['S2_BANDS'].shape[1] / PHISAT2_RESOLUTION), int(eopatch.data['S2_BANDS'].shape[2] / PHISAT2_RESOLUTION))
+            NEW_SIZE = (int(round(s2_data.shape[0] * (S2_RESOLUTION / PHISAT2_RESOLUTION))), int(round(s2_data.shape[1] * (S2_RESOLUTION / PHISAT2_RESOLUTION))))
 
             resize_task_list = []
 
@@ -325,9 +339,6 @@ class SimulationPipeline:
             )
             with rasterio.open(output_tiff_path, "w", **profile) as dst:
                 dst.write(output_data)
-                # Preserve metadata
-                if metadata:
-                    dst.update_tags(**metadata)
 
             return True
 

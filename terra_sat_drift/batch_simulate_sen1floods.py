@@ -136,6 +136,8 @@ def simulate_sen1floods_s2(
             "simulation_steps": steps_obj.as_dict(),
         },
     }
+    
+    geojson = loader.load_geojson_metadata()
 
     for i, s2_file in enumerate(s2_files, 1):
         try:
@@ -146,7 +148,7 @@ def simulate_sen1floods_s2(
             logger.info(f"[{i}/{len(s2_files)}] Processing: {s2_file.name}")
 
             # Run simulation
-            success = pipeline.simulate_single_file(s2_file, output_file)
+            success = pipeline.simulate_single_file(s2_file, output_file, geojson)
 
             if success:
                 results["successful"].append(str(output_file))
