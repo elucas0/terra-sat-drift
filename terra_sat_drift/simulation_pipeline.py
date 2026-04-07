@@ -12,6 +12,9 @@ from scipy.ndimage import gaussian_filter
 import cv2
 import numpy as np
 from skimage.transform import resize
+from shapely.geometry import Point, shape
+from geopandas import GeoDataFrame
+
 
 from sentinelhub.geometry import BBox
 from sentinelhub.constants import CRS
@@ -93,52 +96,60 @@ class SimulationPipeline:
         except Exception as e:
             print(f"Warning: Could not load metadata file: {e}")
             return None
-
-    def _get_acquisition_date_from_country(self, s2_tiff_path: Path | str, metadata: dict) -> Optional[datetime]:
+        
+    def _get_acquisition_date_from_bbox(self, bbox: BBox | None, metadata: GeoDataFrame | None) -> Optional[datetime]:
         """Extract acquisition date from Sen1Floods11 metadata by matching bbox coordinates.
         
         Matches the center point of the bbox against the geometry polygons in the metadata.
         
         Args:
-            s2_tiff_path: Path to the S2 .tiff file.
+            bbox: BBox object from the raster file.
             metadata: Loaded geojson metadata dictionary.
             
         Returns:
             datetime object with the acquisition date, or None if no match found.
         """
-        if metadata is None or "features" not in metadata:
-            print("Warning: No valid metadata provided for acquisition date extraction")
+        if metadata is None or "features" not in metadata or bbox is None:
+            print("Warning: Metadata or bbox not available for date extraction")
+            return None
         
         try:
-            # Get the location name from the path
-            location_name = Path(s2_tiff_path).stem.split("_")[0].lower()
+            # Get center point of bbox as Shapely Point (bbox.middle returns a tuple)
+            center_coords = bbox.middle
+            center_point = Point(center_coords[0], center_coords[1])
             
-            # Search through features to find location of the acquisition
+            # Search through features to find matching geometry
             for feature in metadata.get("features", []):
+                geometry = feature.get("geometry")
                 properties = feature.get("properties", {})
-                location_property = properties.get("location", "").lower()
                 
-                if location_property == location_name:
-                    s2_date_str = properties.get("s2_date")
-                    if s2_date_str:
-                        # Parse date string (format: "YYYY/MM/DD")
-                        date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                        location = properties.get("location", "Unknown")
-                        return date_obj
-                elif location_property == "cambodia" and location_name == "mekong":
-                    # Special case for Cambodia where location name is inconsistent
-                    s2_date_str = properties.get("s2_date")
-                    if s2_date_str:
-                        date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                        return date_obj
-            print(f"Warning: No matching metadata found for this location: {location_name}")
+                if geometry is None:
+                    continue
+                
+                try:
+                    # Convert geojson geometry to shapely shape
+                    geom_shape = shape(geometry)
+                    
+                    # Check if center point is within this geometry
+                    if geom_shape.contains(center_point):
+                        s2_date_str = properties.get("s2_date")
+                        if s2_date_str:
+                            # Parse date string (format: "YYYY/MM/DD")
+                            date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
+                            location = properties.get("location", "Unknown")
+                            print(f"✓ Found acquisition date {date_obj.date()} for location {location}")
+                            return date_obj
+                except Exception as e:
+                    continue
+            
+            print("Warning: No matching metadata found for this location")
             return None
         except Exception as e:
-            print(f"Warning: Error matching path {s2_tiff_path} to metadata: {e}")
+            print(f"Warning: Error matching bbox to metadata: {e}")
             return None
 
     def simulate_single_file(
-        self, s2_tiff_path: Path | str, output_tiff_path: Path | str, metadata: dict
+        self, s2_tiff_path: Path | str, output_tiff_path: Path | str, metadata: GeoDataFrame | None
     ) -> bool:
         """Apply simulation pipeline to a single S2 .tiff file using phisat2_utils tasks.
 
@@ -185,10 +196,10 @@ class SimulationPipeline:
             # Create EOPatch
             eopatch = EOPatch(bbox=bbox)
             
-            # Extract acquisition date from metadata if available using the tiff file country name
+            # Extract acquisition date from metadata if available using bbox matching
             acquisition_date = None
             try:
-                acquisition_date = self._get_acquisition_date_from_country(s2_tiff_path, metadata)
+                acquisition_date = self._get_acquisition_date_from_bbox(bbox, metadata)
             except Exception as e:
                 print(f"Warning: Could not extract acquisition date: {e}")
             

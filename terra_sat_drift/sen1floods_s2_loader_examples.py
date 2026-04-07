@@ -1,9 +1,9 @@
 """Example usage of Sen1Floods11S2 loader for simulation workflow."""
 
 from pathlib import Path
-from terra_sat_drift.sen1floods11_loader import Sen1Floods11S2Loader
-from terra_sat_drift.simulation_pipeline import SimulationPipeline
-from terra_sat_drift.simulation_config import SimulationConfig, SimulationSteps
+from sen1floods11_loader import Sen1Floods11S2Loader
+from simulation_pipeline import SimulationPipeline
+from simulation_config import SimulationConfig, SimulationSteps
 from sentinelhub.exceptions import SHDeprecationWarning
 import warnings
 

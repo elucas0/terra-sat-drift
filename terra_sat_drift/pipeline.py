@@ -242,6 +242,11 @@ class DriftPipeline:
             metadata_path: Optional path to Sen1Floods metadata GeoJSON for acquisition date extraction.
         """
         from .simulation_pipeline import SimulationPipeline
+        
+        # Ensure output directory is set in config
+        simulated_output_dir = Path(simulated_output_dir)
+        simulated_output_dir.mkdir(parents=True, exist_ok=True)
+        simulation_config.output_dir = simulated_output_dir
 
         sim_pipeline = SimulationPipeline(simulation_config)
 
@@ -261,6 +266,7 @@ class DriftPipeline:
                 "simulated_output_dir": str(simulated_output_dir),
                 "simulation_successful": len(sim_results["successful"]),
                 "simulation_failed": len(sim_results["failed"]),
+                "metadata_path": metadata_path,
             },
             "simulation_results": sim_results,
             "drift_analysis": {},
@@ -275,24 +281,41 @@ class DriftPipeline:
         print("STEP 2: Analyze drift between raw and simulated pairs")
         print("=" * 80)
 
-        # Build comparison pairs from simulation output if not provided
+        # Build comparison pairs from simulation results
         if comparison_pairs is None:
             comparison_pairs = []
-            simulated_dir = Path(simulated_output_dir)
             raw_dir = Path(raw_s2_source_dir)
-
-            for sim_file in sorted(simulated_dir.glob("simulated_*.tiff")):
+            
+            # Use the successful simulated files from results
+            for sim_file_path in sim_results["successful"]:
+                sim_file = Path(sim_file_path)
                 # Extract original filename from "simulated_<original>" pattern
                 original_name = sim_file.name.replace("simulated_", "", 1)
                 raw_file = raw_dir / original_name
+                
                 if raw_file.exists():
                     comparison_pairs.append((raw_file, sim_file))
+                else:
+                    print(f"  ⚠ Raw file not found for {original_name}, skipping pair")
 
         print(f"Analyzing {len(comparison_pairs)} raw-vs-simulated pairs...")
+        
+        if not comparison_pairs:
+            print("⚠ No comparison pairs found! Ensure simulated files exist in the output directory.")
+            experiment_results["drift_analysis"] = {
+                "summary": None,
+                "detailed_results": [],
+            }
+            self._save_experiment_results(experiment_results, "simulation_with_analysis")
+            return
 
         drift_results: list = []
+        successful_analyses = 0
+        failed_analyses = 0
+        
         for idx, (raw_file, sim_file) in enumerate(comparison_pairs, 1):
             try:
+                print(f"  ⏳ Pair {idx}/{len(comparison_pairs)}: {raw_file.name}")
                 drift = self.analyzer.analyze_drift_comprehensive(raw_file, sim_file)
                 self.report_printer.print_drift_report(drift, verbose=False)
 
@@ -305,8 +328,12 @@ class DriftPipeline:
                     }
                 )
                 print(f"  ✓ Pair {idx}/{len(comparison_pairs)}: {raw_file.name}")
+                successful_analyses += 1
             except Exception as exc:
                 print(f"  ✗ Pair {idx}/{len(comparison_pairs)}: {raw_file.name} - {exc}")
+                failed_analyses += 1
+        
+        print(f"\nDrift Analysis Summary: {successful_analyses} successful, {failed_analyses} failed")
 
         # Aggregate statistics
         print("\n" + "=" * 80)
@@ -358,6 +385,12 @@ class DriftPipeline:
             experiment_results["drift_analysis"] = {
                 "summary": summary,
                 "detailed_results": drift_results,
+            }
+        else:
+            print("⚠ No drift results to aggregate.")
+            experiment_results["drift_analysis"] = {
+                "summary": None,
+                "detailed_results": [],
             }
 
         self._save_experiment_results(experiment_results, "simulation_with_analysis")
