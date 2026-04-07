@@ -6,32 +6,45 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+import numpy as np
+
 from .drift_analysis import DriftAnalyzer
-from .model_service import TerraMindClassifier
+from .model_tasks import TerraMindClassifier, TerraMindSegmenter
 from .reporting import DriftReportPrinter
 
 
 class DriftPipeline:
     """Coordinate model initialization and drift-analysis example runs."""
 
-    def __init__(self, num_classes: int = 10, backbone_size: str = "large") -> None:
-        """Create the classifier and analyzer used across examples.
+    def __init__(
+        self, 
+        num_classes: int = 10, 
+        backbone_size: str = "large",
+        enable_segmentation: bool = True,
+    ) -> None:
+        """Create the classifier, segmenter, and analyzer used across examples.
 
         Args:
             num_classes: Number of output classes for the classification head.
             backbone_size: TerraMind model size: 'tiny', 'small', 'base', or 'large'.
+            enable_segmentation: Whether to initialize segmentation model (default: True).
+                                Set to False to save memory if only doing classification.
         """
-        self.classifier = TerraMindClassifier(num_classes=num_classes, backbone_size=backbone_size)
-        self.analyzer = DriftAnalyzer(self.classifier)
+        self.classifier = TerraMindClassifier(
+            num_classes=num_classes, 
+            backbone_size=backbone_size
+        )
+        
+        self.segmenter = None
+        if enable_segmentation:
+            # For segmentation, typically use binary (2 classes: background, foreground)
+            self.segmenter = TerraMindSegmenter(
+                num_classes=2,
+                backbone_size=backbone_size
+            )
+        
+        self.analyzer = DriftAnalyzer(self.classifier, segmenter=self.segmenter)
         self.report_printer = DriftReportPrinter()
-
-    def validate(self) -> bool:
-        """Validate model setup and print warning if validation fails."""
-        print("Validating ClassificationTask setup...")
-        valid = self.classifier.validate_setup()
-        if not valid:
-            print("Warning: Model validation failed. Predictions may not work correctly.")
-        return valid
 
     def run_examples(
         self,
@@ -361,6 +374,174 @@ class DriftPipeline:
             }
 
         self._save_experiment_results(experiment_results, "simulation_with_analysis")
+
+    def run_sen1floods_drift_analysis(
+        self,
+        sen1floods_root: str | Path = None,
+        simulated_dir: str | Path = None,
+        split: str = "train",
+        num_samples: int | None = None,
+        sample_indices: list | None = None,
+    ) -> None:
+        """Execute drift analysis on Sen1Floods11 dataset with binary segmentation.
+        
+        Loads paired raw S2 and simulated Φ-sat-2 images from Sen1Floods11 dataset
+        along with ground truth water masks, then analyzes spectral, embedding,
+        classification, and segmentation drift.
+        
+        Args:
+            sen1floods_root: Root path to Sen1Floods11 dataset.
+            simulated_dir: Directory with simulated Φ-sat-2 files.
+            split: Dataset split ('train', 'valid', or 'test').
+            num_samples: Limit analysis to first N pairs (None = all).
+            sample_indices: Specific indices to analyze (overrides num_samples).
+        """
+        from .sen1floods_drift_loader import Sen1FloodsDriftLoader
+        
+        print("\n" + "=" * 80)
+        print("SEN1FLOODS DRIFT ANALYSIS WITH BINARY SEGMENTATION")
+        print("=" * 80)
+        
+        # Initialize loader
+        try:
+            loader = Sen1FloodsDriftLoader(
+                sen1floods_root=sen1floods_root,
+                simulated_dir=simulated_dir,
+                split=split,
+            )
+        except FileNotFoundError as e:
+            print(f"Error initializing loader: {e}")
+            return
+        
+        # Get split info
+        split_info = loader.get_split_info()
+        print(f"\nLoaded {split_info['total_pairs']} pairs from {split} split")
+        print(f"  - Pairs with simulated data: {split_info['pairs_with_simulated']}")
+        print(f"  - Pairs without simulated: {split_info['pairs_without_simulated']}")
+        
+        # Determine which pairs to analyze
+        if sample_indices is not None:
+            indices = sample_indices
+        elif num_samples is not None:
+            indices = list(range(min(num_samples, len(loader))))
+        else:
+            indices = list(range(len(loader)))
+        
+        print(f"\nAnalyzing {len(indices)} pairs...")
+        
+        # Results structure
+        experiment_results = {
+            "metadata": {
+                "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "dataset": "sen1floods11",
+                "split": split,
+                "total_pairs_loaded": len(loader),
+                "pairs_analyzed": len(indices),
+                "sen1floods_root": str(sen1floods_root),
+                "simulated_dir": str(simulated_dir),
+            },
+            "spectral_analysis": {},
+            "embedding_analysis": {},
+            "classification_analysis": {},
+            "segmentation_analysis": {},
+            "detailed_results": [],
+        }
+        
+        # Analyze each pair
+        drift_results = []
+        segmentation_results = []
+        spectral_results = []
+        
+        for idx in indices:
+            try:
+                # Load pair
+                pair_data = loader.load_pair(idx)
+                pair_info = loader.get_pair(idx)
+                
+                raw_s2 = pair_data["raw_s2"]
+                simulated_s2 = pair_data["simulated_s2"]
+                mask = pair_data["mask"]
+                
+                location = loader.get_location_from_filename(idx)
+                
+                print(f"\n[{idx+1}/{len(indices)}] Analyzing {location}: {pair_info['s2_filename']}")
+                
+                # Skip if no simulated data
+                if simulated_s2 is None:
+                    print(f"  ⚠ No simulated data for this pair, skipping")
+                    continue
+                
+                # Run comprehensive drift analysis with segmentation
+                comprehensive_drift = self.analyzer.analyze_drift_with_segmentation(
+                    raw_tif=pair_info["raw_s2"],
+                    simulated_tif=pair_info["simulated_s2"],
+                    ground_truth_mask=mask,
+                )
+                
+                drift_results.append(comprehensive_drift)
+                segmentation_results.append(comprehensive_drift["segmentation_drift"])
+                spectral_results.append(comprehensive_drift["spectral_drift"])
+                
+                # Print summary
+                seg_metrics = comprehensive_drift["segmentation_drift"]["raw_segmentation_metrics"]
+                print(f"  ✓ Raw image IoU: {seg_metrics['iou']:.4f}, Dice: {seg_metrics['dice']:.4f}")
+                
+                sim_metrics = comprehensive_drift["segmentation_drift"]["simulated_segmentation_metrics"]
+                print(f"  ✓ Simulated IoU: {sim_metrics['iou']:.4f}, Dice: {sim_metrics['dice']:.4f}")
+                
+                drift = comprehensive_drift["segmentation_drift"]["drift_metrics"]
+                print(f"  ✓ IoU drift: {drift['iou_drift']:+.4f}, Dice drift: {drift['dice_drift']:+.4f}")
+                
+            except Exception as e:
+                print(f"  ✗ Error analyzing pair {idx}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Aggregate results
+        print("\n" + "=" * 80)
+        print("AGGREGATED ANALYSIS")
+        print("=" * 80)
+        
+        if drift_results:
+            # Segmentation analysis
+            seg_summary = self.analyzer.analyze_segmentation_drift(segmentation_results)
+            print(f"\nSegmentation Drift Summary:")
+            print(f"  Total pairs: {seg_summary['total_pairs']}")
+            print(f"  Raw segmentation avg IoU: {seg_summary['raw_segmentation']['avg_iou']:.4f}")
+            print(f"  Simulated avg IoU: {seg_summary['simulated_segmentation']['avg_iou']:.4f}")
+            print(f"  Avg IoU drift: {seg_summary['drift']['avg_iou_drift']:+.4f}")
+            print(f"  Prediction agreement (avg IoU): {seg_summary['prediction_agreement']['avg_iou']:.4f}")
+            
+            experiment_results["segmentation_analysis"] = seg_summary
+            
+            # Spectral analysis
+            if spectral_results:
+                avg_mean_diffs = [
+                    r["summary"]["avg_mean_difference"] for r in spectral_results
+                ]
+                avg_std_changes = [
+                    r["summary"]["avg_std_change"] for r in spectral_results
+                ]
+                
+                print(f"\nSpectral Drift Summary:")
+                print(f"  Avg mean difference: {np.mean(avg_mean_diffs):.4f}")
+                print(f"  Avg std change: {np.mean(avg_std_changes):.4f}")
+                
+                experiment_results["spectral_analysis"] = {
+                    "avg_mean_difference": float(np.mean(avg_mean_diffs)),
+                    "max_mean_difference": float(np.max(avg_mean_diffs)),
+                    "avg_std_change": float(np.mean(avg_std_changes)),
+                    "max_std_change": float(np.max(avg_std_changes)),
+                }
+            
+            # Store detailed results
+            experiment_results["detailed_results"] = drift_results
+        else:
+            print("No valid pairs analyzed")
+        
+        # Save results
+        self._save_experiment_results(experiment_results, "sen1floods_drift_analysis")
 
     def _save_experiment_results(self, results: dict, experiment_type: str) -> None:
         """Save experiment results to timestamped JSON file.

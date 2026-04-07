@@ -9,24 +9,36 @@ import rasterio
 import torch
 import torch.nn.functional as F
 
-from .model_service import TerraMindClassifier
+from .model_tasks import TerraMindClassifier, TerraMindSegmenter
 
 
 class DriftAnalyzer:
     """Compute multiple drift metrics between pairs of Earth observation TIFFs."""
 
-    def __init__(self, classifier: TerraMindClassifier) -> None:
-        """Initialize analyzer with a configured classifier service."""
+    def __init__(
+        self, 
+        classifier: TerraMindClassifier,
+        segmenter: TerraMindSegmenter | None = None,
+    ) -> None:
+        """Initialize analyzer with classifier and optional segmenter.
+        
+        Args:
+            classifier: TerraMindClassifier instance for classification tasks.
+            segmenter: Optional TerraMindSegmenter instance for segmentation tasks.
+                      If None, segmentation-related methods cannot be used.
+        """
         self.classifier = classifier
+        self.segmenter = segmenter
 
     def extract_spectral_statistics(self, tif_path: str | Path) -> dict:
         """Extract robust per-band statistics for one TIFF file."""
+        band_indices = [1, 2, 3, 7, 4, 5, 6]
         with rasterio.open(tif_path) as src:
             img = src.read().astype(np.float32)
-            img = self.classifier._drop_panchromatic_if_needed(img)
+            img = img[band_indices, :, :]
 
         stats = {}
-        for band_idx, band_name in enumerate(self.classifier.BAND_NAMES):
+        for band_idx, band_name in enumerate(band_indices):
             band_data = img[band_idx, :, :]
             valid_data = band_data[band_data > 0]
 
@@ -244,3 +256,167 @@ class DriftAnalyzer:
             stats["file"] = raw_path.name
             results.append(stats)
         return results
+
+    def compare_segmentation(
+        self, raw_tif: str | Path, simulated_tif: str | Path, ground_truth_mask: np.ndarray
+    ) -> dict:
+        """Compare binary segmentation predictions between raw and simulated imagery.
+        
+        Performs segmentation on both raw and simulated images and compares predictions
+        against ground truth, measuring segmentation drift and consistency.
+        
+        Args:
+            raw_tif: Path to raw S2 TIFF file.
+            simulated_tif: Path to simulated Φ-sat-2 TIFF file.
+            ground_truth_mask: Binary ground truth mask (height, width, values 0 or 1).
+            
+        Returns:
+            Dictionary with segmentation drift metrics:
+            - 'raw_segmentation_metrics': metrics for raw image segmentation
+            - 'simulated_segmentation_metrics': metrics for simulated image segmentation
+            - 'prediction_agreement': how much the two predictions agree
+            - 'iou_drift': change in IoU between raw and simulated
+            - 'dice_drift': change in Dice coefficient
+            
+        Raises:
+            RuntimeError: If segmenter is not available.
+        """
+        if self.segmenter is None:
+            raise RuntimeError(
+                "Segmenter not available. Initialize DriftAnalyzer with a "
+                "TerraMindSegmenter to use segmentation methods."
+            )
+        
+        # Segment raw image
+        raw_seg = self.segmenter.segment_image(raw_tif)
+        raw_pred = raw_seg["segmentation"]
+        raw_metrics = self.segmenter.compute_segmentation_metrics(raw_pred, ground_truth_mask)
+        
+        # Segment simulated image
+        simulated_seg = self.segmenter.segment_image(simulated_tif)
+        simulated_pred = simulated_seg["segmentation"]
+        simulated_metrics = self.segmenter.compute_segmentation_metrics(
+            simulated_pred, ground_truth_mask
+        )
+        
+        # Compute prediction agreement (Dice between two predictions)
+        pred_agreement = self.segmenter.compute_segmentation_metrics(
+            raw_pred, simulated_pred
+        )
+        
+        # Drift metrics
+        iou_drift = simulated_metrics["iou"] - raw_metrics["iou"]
+        dice_drift = simulated_metrics["dice"] - raw_metrics["dice"]
+        accuracy_drift = simulated_metrics["accuracy"] - raw_metrics["accuracy"]
+        f1_drift = simulated_metrics["f1_score"] - raw_metrics["f1_score"]
+        
+        return {
+            "file_pair": {
+                "raw": str(raw_tif),
+                "simulated": str(simulated_tif),
+            },
+            "raw_segmentation_metrics": raw_metrics,
+            "simulated_segmentation_metrics": simulated_metrics,
+            "prediction_agreement": {
+                "dice": pred_agreement["dice"],
+                "iou": pred_agreement["iou"],
+            },
+            "drift_metrics": {
+                "iou_drift": iou_drift,
+                "dice_drift": dice_drift,
+                "accuracy_drift": accuracy_drift,
+                "f1_drift": f1_drift,
+            },
+            "raw_segmentation_quality": raw_metrics,
+            "simulated_segmentation_quality": simulated_metrics,
+        }
+
+    def analyze_drift_with_segmentation(
+        self, raw_tif: str | Path, simulated_tif: str | Path, ground_truth_mask: np.ndarray
+    ) -> dict:
+        """Combine spectral, embedding, classification and segmentation drift.
+        
+        Performs comprehensive drift analysis including the new binary segmentation task.
+        
+        Args:
+            raw_tif: Path to raw S2 TIFF.
+            simulated_tif: Path to simulated Φ-sat-2 TIFF.
+            ground_truth_mask: Binary ground truth mask.
+            
+        Returns:
+            Dictionary with all drift analyses combined.
+        """
+        return {
+            "spectral_drift": self.compare_spectral_signature(raw_tif, simulated_tif),
+            "embedding_drift": self.compare_stability(raw_tif, simulated_tif),
+            "class_drift": self.compare_class_predictions(raw_tif, simulated_tif),
+            "segmentation_drift": self.compare_segmentation(raw_tif, simulated_tif, ground_truth_mask),
+            "file_pair": {
+                "raw": str(raw_tif),
+                "simulated": str(simulated_tif),
+            },
+        }
+
+    @staticmethod
+    def analyze_segmentation_drift(results: list[dict]) -> dict:
+        """Aggregate segmentation drift statistics across multiple comparisons.
+        
+        Args:
+            results: List of segmentation drift comparison dictionaries.
+            
+        Returns:
+            Dictionary with aggregated segmentation metrics.
+        """
+        if not results:
+            return {
+                "total_pairs": 0,
+                "avg_raw_iou": 0.0,
+                "avg_simulated_iou": 0.0,
+                "avg_iou_drift": 0.0,
+                "avg_prediction_agreement": 0.0,
+            }
+        
+        raw_ious = [r["raw_segmentation_metrics"]["iou"] for r in results]
+        sim_ious = [r["simulated_segmentation_metrics"]["iou"] for r in results]
+        iou_drifts = [r["drift_metrics"]["iou_drift"] for r in results]
+        agreements = [r["prediction_agreement"]["iou"] for r in results]
+        
+        raw_dices = [r["raw_segmentation_metrics"]["dice"] for r in results]
+        sim_dices = [r["simulated_segmentation_metrics"]["dice"] for r in results]
+        dice_drifts = [r["drift_metrics"]["dice_drift"] for r in results]
+        
+        raw_f1s = [r["raw_segmentation_metrics"]["f1_score"] for r in results]
+        sim_f1s = [r["simulated_segmentation_metrics"]["f1_score"] for r in results]
+        f1_drifts = [r["drift_metrics"]["f1_drift"] for r in results]
+        
+        return {
+            "total_pairs": len(results),
+            "raw_segmentation": {
+                "avg_iou": float(np.mean(raw_ious)),
+                "avg_dice": float(np.mean(raw_dices)),
+                "avg_f1": float(np.mean(raw_f1s)),
+                "std_iou": float(np.std(raw_ious)),
+                "std_dice": float(np.std(raw_dices)),
+                "std_f1": float(np.std(raw_f1s)),
+            },
+            "simulated_segmentation": {
+                "avg_iou": float(np.mean(sim_ious)),
+                "avg_dice": float(np.mean(sim_dices)),
+                "avg_f1": float(np.mean(sim_f1s)),
+                "std_iou": float(np.std(sim_ious)),
+                "std_dice": float(np.std(sim_dices)),
+                "std_f1": float(np.std(sim_f1s)),
+            },
+            "drift": {
+                "avg_iou_drift": float(np.mean(iou_drifts)),
+                "max_iou_drift": float(np.max(np.abs(iou_drifts))),
+                "avg_dice_drift": float(np.mean(dice_drifts)),
+                "max_dice_drift": float(np.max(np.abs(dice_drifts))),
+                "avg_f1_drift": float(np.mean(f1_drifts)),
+                "max_f1_drift": float(np.max(np.abs(f1_drifts))),
+            },
+            "prediction_agreement": {
+                "avg_iou": float(np.mean(agreements)),
+                "min_iou": float(np.min(agreements)),
+            },
+        }

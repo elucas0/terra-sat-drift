@@ -20,11 +20,11 @@ from eolearn.core.eodata import EOPatch
 from eolearn.core.constants import FeatureType
 from eolearn.core.core_tasks import MapFeatureTask
 from eolearn.features.utils import spatially_resize_image as resize_images
-from simulation_config import SimulationConfig, SimulationSteps
+from .simulation_config import SimulationConfig, SimulationSteps
 
 from tqdm import tqdm
 from tqdm import tqdm
-from phisat2_utils import (  
+from .phisat2_utils import (  
     AddPANBandTask,  
     AddMetadataTask,
     BandMisalignmentTask,  
@@ -33,7 +33,7 @@ from phisat2_utils import (
     AlternativePhisatCalculationTask,
     PhisatCalculationTask,
 )
-from phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
+from .phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
 
 class SimulationPipeline:
     """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
@@ -269,7 +269,7 @@ class SimulationPipeline:
                 eopatch = misalign_task.execute(eopatch)
                 current_feature = "S2_MISALIGNED"
 
-            #  Step 4: SNR + PSF simulation 
+            # SNR + PSF simulation 
             if self.config.steps.snr_simulation or self.config.steps.psf_filtering:
                 # Check which method to use for SNR/PSF calculation
                 use_executable = (
@@ -279,7 +279,7 @@ class SimulationPipeline:
                 )
                 
                 if use_executable and self.config.phisat2_exec_path:
-                    # Step 4a: SNR simulation using executable
+                    # SNR simulation using executable
                     if self.config.steps.snr_simulation:
                         snr_task = PhisatCalculationTask(
                             input_feature=(FeatureType.DATA, current_feature),
@@ -290,7 +290,7 @@ class SimulationPipeline:
                         eopatch = snr_task.execute(eopatch)
                         current_feature = "L_out_SNR"
                     
-                    # Step 4b: PSF filtering using executable
+                    # PSF filtering using executable
                     if self.config.steps.psf_filtering:
                         psf_task = PhisatCalculationTask(
                             input_feature=(FeatureType.DATA, current_feature),
@@ -317,7 +317,7 @@ class SimulationPipeline:
                     eopatch = snr_psf_task.execute(eopatch)
                     current_feature = "S2_PSF"
 
-            #  Step 5: Reflectance conversion (if L1C) 
+            # Reflectance conversion (if L1C) 
             if self.config.steps.reflectance_conversion and self.config.processing_level == "L1C":
                 reflectance_task = CalculateReflectanceTask(
                     (FeatureType.DATA, current_feature),
@@ -327,7 +327,7 @@ class SimulationPipeline:
                 eopatch = reflectance_task.execute(eopatch)
                 current_feature = "S2_REFLECTANCE"
 
-            #  Extract result and save 
+            # Extract result and save 
             # Remove time dimension: (time, height, width, bands) -> (height, width, bands)
             output_data = eopatch[FeatureType.DATA, current_feature][0]
             # Transpose to rasterio format: (bands, height, width)

@@ -16,7 +16,7 @@ import shapely.ops
 from cv2 import warpAffine
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from phisat2_constants import (
+from .phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,

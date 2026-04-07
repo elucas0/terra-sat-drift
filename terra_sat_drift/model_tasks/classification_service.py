@@ -84,46 +84,15 @@ class TerraMindClassifier:
         model.eval()
         return model
 
-    def validate_setup(self) -> bool:
-        """Run a lightweight model sanity check.
-
-        Returns:
-            True when model output and softmax pass complete successfully.
-        """
-        try:
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 7, 64, 64).to(self.device)
-                model_output = self.model.forward(dummy_input)
-                logits = model_output.output
-                print(f"✓ ClassificationTask returns ModelOutput with logits shape: {logits.shape}")
-
-                if logits.dim() >= 2:
-                    probs = F.softmax(logits.view(logits.shape[0], -1), dim=1)
-                    print(f"✓ Successfully computed probabilities with shape: {probs.shape}")
-            return True
-        except Exception as exc:
-            print(f"✗ Model validation failed: {exc}")
-            import traceback
-
-            traceback.print_exc()
-            return False
-
-    @classmethod
-    def _drop_panchromatic_if_needed(cls, img: np.ndarray) -> np.ndarray:
-        """Normalize incoming arrays to exactly 7 S2 spectral bands."""
-        if img.shape[0] == 8:
-            return img[[0, 1, 2, 4, 5, 6, 7], :, :]
-        if img.shape[0] != 7:
-            raise ValueError(f"Expected 7 or 8 bands, got {img.shape[0]}")
-        return img
-
     def load_tif_for_model(self, path: str | Path) -> torch.Tensor:
         """Load a TIFF and return model-ready tensor in BCHW format."""
+        band_indices = [1, 2, 3, 7, 4, 5, 6]
         with rasterio.open(path) as src:
-            img = src.read().astype(np.float32)
-            img = self._drop_panchromatic_if_needed(img)
+            s2_data = src.read().astype(np.float32)
+            # Select "B02", "B03", "B04", "B08", "B05", "B06", "B07"
+            s2_data = s2_data[band_indices, :, :]
 
-        tensor = torch.from_numpy(img).unsqueeze(0)
+        tensor = torch.from_numpy(s2_data).unsqueeze(0)
         return tensor.to(self.device)
 
     def extract_embeddings(self, tensor: torch.Tensor) -> list[torch.Tensor]:
