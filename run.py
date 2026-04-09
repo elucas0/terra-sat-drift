@@ -7,6 +7,8 @@ from terra_sat_drift import (
     DriftPipeline,
 )
 from pathlib import Path
+import numpy as np
+import rasterio
 
 def example_classification_only():
     """Perform classification-only drift analysis."""
@@ -33,12 +35,9 @@ def example_segmentation_only():
     
     # Initialize segmenter (binary segmentation: background vs foreground)
     segmenter = TerraMindSegmenter(num_classes=2, backbone_size="base")
-    
-    # Validate model
-    segmenter.validate_setup()
-    
+
     # Segment a single image
-    s2_file = Path("path/to/s2_image.tif")
+    s2_file = Path("datasets/sen1floods11/v1.1/data/flood_events/HandLabeled/S2Hand/Ghana_277_S2Hand.tif")
     segmentation_result = segmenter.segment_image(s2_file)
     
     # Get segmentation map and probabilities
@@ -49,8 +48,10 @@ def example_segmentation_only():
     print(f"Probability map shape: {prob_map.shape}")
     
     # Compute metrics against ground truth
-    import numpy as np
-    ground_truth = np.load("path/to/ground_truth_mask.npy")
+    # Load TIFF file and convert to numpy array
+    with rasterio.open("datasets/sen1floods11/v1.1/data/flood_events/HandLabeled/LabelHand/Ghana_277_LabelHand.tif") as src:
+        ground_truth = src.read(1).astype(np.float32)  # Read first band
+    
     metrics = segmenter.compute_segmentation_metrics(seg_map, ground_truth)
     
     print(f"IoU: {metrics['iou']:.4f}")
@@ -112,7 +113,7 @@ def example_full_pipeline():
         sen1floods_root="./datasets/sen1floods11",
         simulated_dir="./tiff_folder/simulated_sen1floods",
         split="train",
-        num_samples=10,
+        num_samples=None,
     )
     
 def example_custom_setup():
@@ -154,9 +155,9 @@ if __name__ == "__main__":
     
     # Uncomment any example to run:
     # example_classification_only()
-    # example_segmentation_only()
+    example_segmentation_only()
     # example_combined_drift_analysis()
-    example_full_pipeline()
+    # example_full_pipeline()
     # example_custom_setup()
     
     print("\nSee comments above to run specific examples.")

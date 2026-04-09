@@ -30,6 +30,7 @@ class TerraMindSegmenter:
         num_classes: int = 2,
         backbone_size: str = "base",
         device: torch.device | None = None,
+        class_names: list[str] | None = None,
     ) -> None:
         """Build the TerraMind-backed semantic segmentation model.
 
@@ -48,6 +49,7 @@ class TerraMindSegmenter:
         self.num_classes = num_classes
         self.backbone_size = backbone_size
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.class_names = class_names or [f"class_{i}" for i in range(num_classes)]
         self.model = self._build_model()
 
     def _build_model(self) -> SemanticSegmentationTask:
@@ -70,7 +72,8 @@ class TerraMindSegmenter:
             "backbone_pretrained": True,
             "backbone_modalities": ["S2L1C"],
             "backbone_bands": {"S2L1C": self.BAND_NAMES},
-            "decoder": "FCNDecoder",
+            "decoder": "UNetDecoder",
+            "decoder_channels": [256, 128, 64, 32],
             "necks": [
                 {"name": "SelectIndices", "indices": neck_indices},
                 {"name": "ReshapeTokensToImage", "remove_cls_token": False},
@@ -80,36 +83,11 @@ class TerraMindSegmenter:
         }
 
         model = SemanticSegmentationTask(
-            model_factory="EncoderDecoderFactory", model_args=model_args
+            model_factory="EncoderDecoderFactory", model_args=model_args, class_names=self.class_names
         )
         model.to(self.device)
         model.eval()
         return model
-
-    def validate_setup(self) -> bool:
-        """Run a lightweight model sanity check.
-
-        Returns:
-            True when model output and softmax pass complete successfully.
-        """
-        try:
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 7, 64, 64).to(self.device)
-                model_output = self.model.forward(dummy_input)
-                logits = model_output.output
-                print(f"✓ SemanticSegmentationTask returns ModelOutput with logits shape: {logits.shape}")
-
-                if logits.dim() == 4:
-                    # Spatial output: (batch, channels, height, width)
-                    probs = F.softmax(logits, dim=1)
-                    print(f"✓ Successfully computed spatial probabilities with shape: {probs.shape}")
-            return True
-        except Exception as exc:
-            print(f"✗ Model validation failed: {exc}")
-            import traceback
-
-            traceback.print_exc()
-            return False
 
     def load_tif_for_model(self, path: str | Path) -> torch.Tensor:
         """Load a TIFF and return model-ready tensor in BCHW format."""
@@ -178,9 +156,7 @@ class TerraMindSegmenter:
                 raise ValueError(
                     f"Expected 4D spatial logits, got {logits.dim()}D: {logits.shape}"
                 )
-            
-            batch_size, num_channels, height, width = logits.shape
-            
+                        
             # Compute probabilities via softmax
             probs = F.softmax(logits, dim=1)  # (batch, channels, height, width)
             

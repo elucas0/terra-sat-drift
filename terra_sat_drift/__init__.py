@@ -1,8 +1,6 @@
-"""Utilities for spectral and embedding drift analysis on TerraTorch models."""
+"""Top-level package for TerraSatDrift, provides data loading, model tasks, drift analysis, and reporting utilities."""
 
-from .drift_analysis import DriftAnalyzer
 from .model_tasks import TerraMindClassifier, TerraMindSegmenter
-from .pipeline import DriftPipeline
 from .reporting import DriftReportPrinter
 from .data_simulation import SimulationConfig, SimulationSteps
 from .data_simulation import SimulationPipeline
@@ -11,8 +9,6 @@ from .sen1floods_drift_loader import Sen1FloodsDriftLoader
 
 
 __all__ = [
-    "DriftAnalyzer",
-    "DriftPipeline",
     "DriftReportPrinter",
     "TerraMindClassifier",
     "TerraMindSegmenter",

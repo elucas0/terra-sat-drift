@@ -9,8 +9,10 @@ from datetime import datetime
 import numpy as np
 
 from .drift_analysis import DriftAnalyzer
-from .model_tasks import TerraMindClassifier, TerraMindSegmenter
-from .reporting import DriftReportPrinter
+from ..model_tasks import TerraMindClassifier, TerraMindSegmenter
+from ..reporting import DriftReportPrinter
+from ..sen1floods_drift_loader import Sen1FloodsDriftLoader
+
 
 
 class DriftPipeline:
@@ -377,8 +379,8 @@ class DriftPipeline:
 
     def run_sen1floods_drift_analysis(
         self,
-        sen1floods_root: str | Path = None,
-        simulated_dir: str | Path = None,
+        sen1floods_root: str | Path,
+        simulated_dir: str | Path,
         split: str = "train",
         num_samples: int | None = None,
         sample_indices: list | None = None,
@@ -396,11 +398,7 @@ class DriftPipeline:
             num_samples: Limit analysis to first N pairs (None = all).
             sample_indices: Specific indices to analyze (overrides num_samples).
         """
-        from .sen1floods_drift_loader import Sen1FloodsDriftLoader
-        
-        print("\n" + "=" * 80)
         print("SEN1FLOODS DRIFT ANALYSIS WITH BINARY SEGMENTATION")
-        print("=" * 80)
         
         # Initialize loader
         try:
@@ -458,17 +456,13 @@ class DriftPipeline:
                 pair_data = loader.load_pair(idx)
                 pair_info = loader.get_pair(idx)
                 
-                raw_s2 = pair_data["raw_s2"]
                 simulated_s2 = pair_data["simulated_s2"]
                 mask = pair_data["mask"]
                 
-                location = loader.get_location_from_filename(idx)
-                
-                print(f"\n[{idx+1}/{len(indices)}] Analyzing {location}: {pair_info['s2_filename']}")
-                
                 # Skip if no simulated data
                 if simulated_s2 is None:
-                    print(f"  ⚠ No simulated data for this pair, skipping")
+                    location = loader.get_location_from_filename(idx)
+                    print(f"No simulated data for pair {idx} (location: {location}), skipping...")
                     continue
                 
                 # Run comprehensive drift analysis with segmentation
@@ -481,16 +475,6 @@ class DriftPipeline:
                 drift_results.append(comprehensive_drift)
                 segmentation_results.append(comprehensive_drift["segmentation_drift"])
                 spectral_results.append(comprehensive_drift["spectral_drift"])
-                
-                # Print summary
-                seg_metrics = comprehensive_drift["segmentation_drift"]["raw_segmentation_metrics"]
-                print(f"  ✓ Raw image IoU: {seg_metrics['iou']:.4f}, Dice: {seg_metrics['dice']:.4f}")
-                
-                sim_metrics = comprehensive_drift["segmentation_drift"]["simulated_segmentation_metrics"]
-                print(f"  ✓ Simulated IoU: {sim_metrics['iou']:.4f}, Dice: {sim_metrics['dice']:.4f}")
-                
-                drift = comprehensive_drift["segmentation_drift"]["drift_metrics"]
-                print(f"  ✓ IoU drift: {drift['iou_drift']:+.4f}, Dice drift: {drift['dice_drift']:+.4f}")
                 
             except Exception as e:
                 print(f"  ✗ Error analyzing pair {idx}: {e}")
