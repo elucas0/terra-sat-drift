@@ -3,23 +3,22 @@
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
-import pytorch_lightning as pl
-import torch
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.loggers import TensorBoardLogger
 
 from terratorch.datamodules.sen1floods11 import Sen1Floods11NonGeoDataModule
 from terratorch.tasks import SemanticSegmentationTask
 from terratorch import BACKBONE_REGISTRY
 
+from phisat2_constants import S2_BANDS_NAMES, S2_BANDS
 
 from phisat2_albumentations import create_phisat2_transform
 
 logger = logging.getLogger(__name__)
 
-BAND_NAMES = ["B02", "B03", "B04", "B08", "B05", "B06", "B07"]
 BACKBONE_SIZES = {"tiny", "small", "base", "large"}
 BACKBONE_NECK_INDICES = {
     "tiny": [1, 3, 4, 5],
@@ -76,16 +75,20 @@ class TerraMindSen1FloodsTrainer:
         Returns:
             Configured Sen1Floods11NonGeoDataModule
         """
-        train_transform = None
+        phisat_transform = None
         if phisat_config:
-            train_transform = create_phisat2_transform(phisat_config)
-
+            phisat_transform = create_phisat2_transform(phisat_config)
+            
         return Sen1Floods11NonGeoDataModule(
             data_root=root_dir,
-            train_transform=train_transform,
+            bands=S2_BANDS_NAMES,
+            train_transform=phisat_transform,
+            val_transform=phisat_transform,
+            test_transform=phisat_transform,
             num_workers=self.num_workers,
             batch_size=self.batch_size,
             download=False,
+            use_metadata=True
         )
 
     def create_model(
@@ -106,19 +109,11 @@ class TerraMindSen1FloodsTrainer:
         backbone_name = f"terramind_v1_{self.backbone_size}"
         neck_indices = BACKBONE_NECK_INDICES[self.backbone_size]
 
-        # Build TerraMind backbone with pretrained weights
-        terramind_backbone = BACKBONE_REGISTRY.build(
-            backbone_name,
-            pretrained=True,
-            modalities=["S2L1C"],
-            bands={"S2L1C": BAND_NAMES},
-        )
-        
         model_args = {
-            "backbone": terramind_backbone,
-            "backbone_pretrained": True,
+            "backbone": backbone_name,
+            "backbone_pretrained": pretrained,
             "backbone_modalities": ["S2L1C"],
-            "backbone_bands": {"S2L1C": BAND_NAMES},
+            "backbone_bands": {"S2L1C": S2_BANDS},
             "decoder": "UNetDecoder",
             "decoder_channels": [256, 128, 64, 32],
             "necks": [
@@ -130,17 +125,21 @@ class TerraMindSen1FloodsTrainer:
         }
         
         return SemanticSegmentationTask(
+            model_factory="EncoderDecoderFactory",
             model_args=model_args,
             lr=self.learning_rate,
+            ignore_index=-1,
+            plot_on_val=0,
+            freeze_backbone=True,  # Start with frozen backbone for stage 1
         )
 
     def train(
         self,
         datamodule: Sen1Floods11NonGeoDataModule,
         model: SemanticSegmentationTask,
-        stage_1_epochs: int = 10,
-        disable_stage_2: bool = False,
-    ) -> SemanticSegmentationTask:
+        stage_1_epochs: int = 15,
+        disable_stage_2: bool = True,
+    ) -> Tuple[Trainer, SemanticSegmentationTask]:
         """Execute staged fine-tuning on Sen1Floods11.
         
         Stage 1: Train head/decoder only (backbone frozen)
@@ -165,26 +164,22 @@ class TerraMindSen1FloodsTrainer:
             stage=1,
             max_epochs=stage_1_epochs,
         )
-        trainer_stage1.fit(model, datamodule=datamodule)
+        trainer_stage1.fit(model, datamodule)
         
-        if not disable_stage_2:
-            # Stage 2: Fine-tune entire model (backbone unfrozen)
-            logger.info(
-                f"Stage 2: Fine-tuning full model (epochs {stage_1_epochs}-{self.max_epochs})"
-            )
-            self._unfreeze_backbone(model)
+        # if not disable_stage_2:
+        #     # Stage 2: Fine-tune entire model (backbone unfrozen)
+        #     logger.info(
+        #         f"Stage 2: Fine-tuning full model (epochs {stage_1_epochs}-{self._max_epochs})"
+        #     )
+        #     self._unfreeze_backbone(model)
             
-            # Reduce learning rate for fine-tuning
-            for param_group in model.optimizer.param_groups:
-                param_group["lr"] = self.learning_rate * 0.1
-            
-            trainer_stage2 = self._create_trainer(
-                stage=2,
-                max_epochs=self.max_epochs - stage_1_epochs,
-            )
-            trainer_stage2.fit(model, datamodule=datamodule, ckpt_path="last")
+        #     trainer_stage2 = self._create_trainer(
+        #         stage=2,
+        #         max_epochs=self._max_epochs - stage_1_epochs,
+        #     )
+        #     trainer_stage2.fit(model, datamodule=datamodule, ckpt_path="last")
 
-        return model
+        return trainer_stage1, model
 
     def _freeze_backbone(self, model: SemanticSegmentationTask) -> None:
         """Freeze all backbone parameters."""
@@ -204,7 +199,7 @@ class TerraMindSen1FloodsTrainer:
         self,
         stage: int,
         max_epochs: int,
-    ) -> pl.Trainer:
+    ) -> Trainer:
         """Create PyTorch Lightning trainer with callbacks.
         
         Args:
@@ -216,17 +211,17 @@ class TerraMindSen1FloodsTrainer:
         """
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.output_dir / f"checkpoints_stage{stage}",
-            filename="model-{epoch:02d}-{val_loss:.3f}",
-            monitor="val_loss",
-            mode="min",
+            filename="best-val_mIoU",
+            monitor="val/mIoU",
+            mode="max",
             save_top_k=3,
             verbose=True,
         )
 
         early_stopping = EarlyStopping(
-            monitor="val_loss",
+            monitor="val/mIoU",
             patience=5,
-            mode="min",
+            mode="max",
             verbose=True,
         )
 
@@ -236,13 +231,10 @@ class TerraMindSen1FloodsTrainer:
             version=0,
         )
 
-        return pl.Trainer(
+        return Trainer(
             max_epochs=max_epochs,
             callbacks=[checkpoint_callback, early_stopping],
             logger=logger_tb,
-            accelerator="ddp" if torch.cuda.is_available() else "cpu",
-            devices="auto" if torch.cuda.is_available() else 1,
-            precision="16-mixed" if self.use_amp else 32,
             log_every_n_steps=10,
             enable_progress_bar=True,
         )
@@ -254,14 +246,13 @@ def main():
         description="Train TerraMind on Sen1Floods11 with optional Phisat-2 augmentation"
     )
     
-    # Required arguments
     parser.add_argument(
-        "data_root",
+        "--data_root",
         type=str,
+        default="datasets/sen1floods11",
         help="Path to Sen1Floods11 dataset root directory",
     )
     
-    # Optional arguments
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -338,7 +329,7 @@ def main():
     parser.add_argument(
         "--psf_executable",
         type=str,
-        default=None,
+        default="./executables/phisat2_unix.bin",
         help="Path to PSF executable binary (optional)",
     )
     parser.add_argument(
@@ -369,21 +360,24 @@ def main():
     
     # Build phisat configuration
     phisat_config = {
-        "apply_band_misalignment": args.apply_band_misalignment,
-        "apply_pan_band": args.apply_pan_band,
-        "apply_psf": args.apply_psf,
-        "apply_snr": args.apply_snr,
-        "processing_level": args.processing_level,
+        "apply_radiance_calculation": True,
+        "apply_band_misalignment": True,
+        "apply_pan_band": True,
+        "apply_psf": True,
+        "apply_snr": True,
+        "processing_level": "L1A",
+        "psf_executable": "./executables/phisat2_unix.bin",
+        "snr_executable": "./executables/phisat2_unix.bin",
     }
     
-    # Add executables if provided
-    if args.psf_executable:
-        phisat_config["psf_executable"] = args.psf_executable
-        logger.info(f"Using PSF executable: {args.psf_executable}")
+    # # Add executables if provided
+    # if args.psf_executable:
+    #     phisat_config["psf_executable"] = args.psf_executable
+    #     logger.info(f"Using PSF executable: {args.psf_executable}")
     
-    if args.snr_executable:
-        phisat_config["snr_executable"] = args.snr_executable
-        logger.info(f"Using SNR executable: {args.snr_executable}")
+    # if args.snr_executable:
+    #     phisat_config["snr_executable"] = args.snr_executable
+    #     logger.info(f"Using SNR executable: {args.snr_executable}")
     
     logger.info(f"Phisat-2 config: {phisat_config}")
     
@@ -398,17 +392,17 @@ def main():
     model = trainer.create_model(num_classes=2, pretrained=True)
     
     # Train
-    trained_model = trainer.train(
+    trainer, trained_model = trainer.train(
         datamodule=datamodule,
         model=model,
-        stage_1_epochs=10,
+        stage_1_epochs=20,
         disable_stage_2=False,
     )
+    logger.info(f"Training complete!")
     
     # Save final model
-    final_ckpt = Path(args.output_dir) / "final_model.ckpt"
-    trainer._create_trainer(stage=2, max_epochs=1).save_checkpoint(final_ckpt)
-    logger.info(f"Training complete! Final model saved to {final_ckpt}")
+    final_ckpt = Path(args.output_dir) / "best-val_mIoU.ckpt"
+    trainer.test(trained_model, datamodule=datamodule, ckpt_path=str(final_ckpt))
 
 
 if __name__ == "__main__":

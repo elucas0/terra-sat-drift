@@ -43,8 +43,7 @@ class SimulationConfig:
 
     # Processing parameters
     phisat2_exec_path: Optional[str] = None  # Path to phisat2 binary if using SNR/PSF tasks
-    sh_config_path: Optional[str] = None  # Path to Sentinel Hub config for metadata fetching
-    snr_psf_method: str = "alternative"  # "alternative" for Python implementation or "executable" for binary
+    snr_psf_method: str = "executable"  # "alternative" for Python implementation or "executable" for binary
     cell_size: int = 256
     grid_overlap: float = 0.0
     processing_level: str = "L1C"  # L1A, L1B, or L1C
@@ -84,7 +83,6 @@ class SimulationConfig:
             "s2_source_dir": str(self.s2_source_dir),
             "output_dir": str(self.output_dir),
             "phisat2_exec_path": self.phisat2_exec_path,
-            "sh_config_path": self.sh_config_path,
             "snr_psf_method": self.snr_psf_method,
             "cell_size": self.cell_size,
             "grid_overlap": self.grid_overlap,

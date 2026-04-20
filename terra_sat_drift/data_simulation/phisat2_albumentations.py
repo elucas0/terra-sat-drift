@@ -19,8 +19,9 @@ import albumentations as A
 import cv2
 import numpy as np
 from albumentations.core.transforms_interface import ImageOnlyTransform
+from albumentations.pytorch import ToTensorV2
 
-from terra_sat_drift.data_simulation.phisat2_constants import (
+from phisat2_constants import (
     L1A_RELATIVE_SHIFTS, 
     L1A_RAND_MEAN, 
     L1A_RAND_STD, 
@@ -722,14 +723,8 @@ def create_phisat2_transform(
     transforms = []
     
     if phisat_config is None:
-        phisat_config = {
-            "apply_radiance_calculation": False,
-            "apply_band_misalignment": True,
-            "apply_pan_band": False,
-            "apply_psf": False,
-            "apply_snr": False,
-            "processing_level": ProcessingLevels.L1A,
-        }
+        print("No Phisat-2 configuration provided, returning empty Compose")
+        return A.Compose([])
     
     # Radiance calculation from reflectances, uses location/temporal coords
     if phisat_config.get("apply_radiance_calculation", False):
@@ -813,5 +808,7 @@ def create_phisat2_transform(
                     l_ref=phisat_config.get("l_ref", 0.1),
                 )
             )
+            
+        transforms.append(ToTensorV2())
     
     return A.Compose(transforms)

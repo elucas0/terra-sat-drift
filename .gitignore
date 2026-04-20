@@ -210,3 +210,4 @@ tiff_folder
 experiments
 datasets
 *.bin
+outputs
