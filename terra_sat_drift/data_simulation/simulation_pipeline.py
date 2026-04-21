@@ -20,11 +20,11 @@ from eolearn.core.eodata import EOPatch
 from eolearn.core.constants import FeatureType
 from eolearn.core.core_tasks import MapFeatureTask
 from eolearn.features.utils import spatially_resize_image as resize_images
-from .simulation_config import SimulationConfig, SimulationSteps
+from simulation_config import SimulationConfig, SimulationSteps
 
 from tqdm import tqdm
 from tqdm import tqdm
-from .phisat2_utils import (  
+from phisat2_utils import (  
     AddPANBandTask,  
     AddMetadataTask,
     BandMisalignmentTask,  
@@ -33,7 +33,7 @@ from .phisat2_utils import (
     AlternativePhisatCalculationTask,
     PhisatCalculationTask,
 )
-from .phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
+from phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
 
 class SimulationPipeline:
     """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
@@ -51,8 +51,59 @@ class SimulationPipeline:
             config: SimulationConfig instance defining processing steps and parameters.
         """
         self.config = config
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(self.config.output_dir) if isinstance(self.config.output_dir, str) else self.config.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_metadata_from_file(self, tiff_path: Path | str) -> dict:
+        """Load metadata JSON file associated with a TIFF file.
         
+        Extracts the ID (last part) from the TIFF filename and looks for matching metadata.
+        For example: S2B_Crop_10m_2091.tif -> 2091_S2B_metadata.json
+        
+        Args:
+            tiff_path: Path to the TIFF file
+            
+        Returns:
+            Dictionary with metadata (earth_sun_dist, solar_irradiances, sun_zenith_angles),
+            or raises FileNotFoundError if no metadata file found.
+        """
+        tiff_path = Path(tiff_path)
+        stem = tiff_path.stem
+        parent_dir = tiff_path.parent
+        
+        # Extract the ID (last string) by splitting on underscores
+        parts = stem.split('_')
+        if not parts:
+            print(f"Warning: Could not extract ID from filename {tiff_path.name}")
+            raise FileNotFoundError("Could not extract ID from TIFF filename")
+        
+        id_str = parts[-1]
+        satellite = parts[0] if len(parts) > 0 else ""
+        
+        # Try common naming patterns with the extracted ID
+        possible_metadata_paths = [
+            parent_dir / f"{id_str}_{satellite}_metadata.json",
+            parent_dir / f"{id_str}_metadata.json",
+            parent_dir / f"{id_str}.json",
+            parent_dir / f"{stem}_metadata.json",
+            parent_dir / f"{stem}.json",
+        ]
+        
+        for metadata_path in possible_metadata_paths:
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                    print(f"✓ Loaded metadata from {metadata_path.name}")
+                    return metadata
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Failed to parse JSON metadata {metadata_path}: {e}")
+                except Exception as e:
+                    print(f"Warning: Error loading metadata file {metadata_path}: {e}")
+        
+        print(f"Warning: No metadata file found for {tiff_path.name} (ID: {id_str})")
+        raise FileNotFoundError("No metadata file found")
+
     def _create_bbox_from_rasterio(self, src) -> BBox:
         """Create BBox object from rasterio source.
             
@@ -71,71 +122,6 @@ class SimulationPipeline:
                 crs=CRS(src.crs)
         )
         return bbox
-
-    def _load_sen1floods_metadata(self, metadata_path: str):
-        """Load Sen1Floods11 metadata GeoJSON file.
-        
-        Args:
-            metadata_path: Path to the metadata GeoJSON file.
-            
-        Returns:
-            Dictionary with geojson data or None if file not found.
-        """
-        try:
-            path = Path(metadata_path).expanduser().resolve()
-            if not path.exists():
-                print(f"Warning: Metadata file not found at {path}")
-                return None
-            
-            with open(path, "r") as f:
-                metadata = json.load(f)
-            return metadata
-        except Exception as e:
-            print(f"Warning: Could not load metadata file: {e}")
-            return None
-
-    def _get_acquisition_date_from_country(self, s2_tiff_path: Path | str, metadata: dict) -> Optional[datetime]:
-        """Extract acquisition date from Sen1Floods11 metadata by matching bbox coordinates.
-        
-        Matches the center point of the bbox against the geometry polygons in the metadata.
-        
-        Args:
-            s2_tiff_path: Path to the S2 .tiff file.
-            metadata: Loaded geojson metadata dictionary.
-            
-        Returns:
-            datetime object with the acquisition date, or None if no match found.
-        """
-        if metadata is None or "features" not in metadata:
-            print("Warning: No valid metadata provided for acquisition date extraction")
-        
-        try:
-            # Get the location name from the path
-            location_name = Path(s2_tiff_path).stem.split("_")[0].lower()
-            
-            # Search through features to find location of the acquisition
-            for feature in metadata.get("features", []):
-                properties = feature.get("properties", {})
-                location_property = properties.get("location", "").lower()
-                
-                if location_property == location_name:
-                    s2_date_str = properties.get("s2_date")
-                    if s2_date_str:
-                        # Parse date string (format: "YYYY/MM/DD")
-                        date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                        location = properties.get("location", "Unknown")
-                        return date_obj
-                elif location_property == "cambodia" and location_name == "mekong":
-                    # Special case for Cambodia where location name is inconsistent
-                    s2_date_str = properties.get("s2_date")
-                    if s2_date_str:
-                        date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                        return date_obj
-            print(f"Warning: No matching metadata found for this location: {location_name}")
-            return None
-        except Exception as e:
-            print(f"Warning: Error matching path {s2_tiff_path} to metadata: {e}")
-            return None
 
     def simulate_single_file(
         self, s2_tiff_path: Path | str, output_tiff_path: Path | str, metadata: dict
@@ -170,13 +156,13 @@ class SimulationPipeline:
                     bbox = None
 
             # Select "B02", "B03", "B04", "B08", "B05", "B06", "B07"
-            band_indices = [1, 2, 3, 7, 4, 5, 6]
-            s2_data = s2_data[band_indices, :, :]
+            # band_indices = [1, 2, 3, 7, 4, 5, 6]
+            # s2_data = s2_data[band_indices, :, :]
             
-            TARGET_10M_SIZE = (512, 512)
-            if s2_data.shape[1:] != TARGET_10M_SIZE:
-                s2_data = resize(s2_data, (len(band_indices), *TARGET_10M_SIZE), 
-                                order=1, preserve_range=True, anti_aliasing=True)
+            # TARGET_10M_SIZE = (512, 512)
+            # if s2_data.shape[1:] != TARGET_10M_SIZE:
+            #     s2_data = resize(s2_data, (len(band_indices), *TARGET_10M_SIZE), 
+            #                     order=1, preserve_range=True, anti_aliasing=True)
             
             # Transpose from (bands, height, width) to (height, width, bands)
             s2_data = np.transpose(s2_data, (1, 2, 0))
@@ -185,27 +171,19 @@ class SimulationPipeline:
             # Create EOPatch
             eopatch = EOPatch(bbox=bbox)
             
-            # Extract acquisition date from metadata if available using the tiff file country name
-            acquisition_date = None
-            try:
-                acquisition_date = self._get_acquisition_date_from_country(s2_tiff_path, metadata)
-            except Exception as e:
-                print(f"Warning: Could not extract acquisition date: {e}")
-            
-            # Use acquisition date or fall back to current datetime
-            eopatch.timestamp = [acquisition_date if acquisition_date else datetime.now()]
-            
             # Shape: (time, height, width, bands)
             eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
 
-            # Fetch metadata: Solar irradiance and Earth-Sun distance
+            # Add metadata to EOPatch: Solar irradiance, Earth-Sun distance, Sun zenith angles
             try:
                 add_meta_task = AddMetadataTask()
-                eopatch = add_meta_task.execute(eopatch)
+                eopatch = add_meta_task.execute(eopatch, metadata)
             except Exception as e:
                 print(f"Warning: Failed to fetch metadata: {e}")
                 print("Skipping radiance conversion - metadata required")
                 self.config.steps.radiance = False
+                
+            print(f"EOPatch with metadata: {eopatch}")
 
             #  Radiance conversion
             if self.config.steps.radiance:
@@ -237,7 +215,7 @@ class SimulationPipeline:
                     FeatureType.DATA: [current_feature],
                 }
             
-            NEW_SIZE = (int(round(s2_data.shape[0] * (S2_RESOLUTION / PHISAT2_RESOLUTION))), int(round(s2_data.shape[1] * (S2_RESOLUTION / PHISAT2_RESOLUTION))))
+            NEW_SIZE = (int((s2_data.shape[0] * S2_RESOLUTION) / PHISAT2_RESOLUTION), int((s2_data.shape[1] * S2_RESOLUTION) / PHISAT2_RESOLUTION))
 
             resize_task_list = []
 
@@ -255,6 +233,9 @@ class SimulationPipeline:
                     eopatch = resize_task_list[-1](eopatch)
                     
             current_feature = f"{current_feature}_RES"
+            
+            print(f"Resized features to {NEW_SIZE} for Φ-sat-2 simulation")
+            print(f"EOPatch after resizing: {eopatch}")
             
             # Band misalignment
             if self.config.steps.band_misalignment:
@@ -326,6 +307,8 @@ class SimulationPipeline:
                 )
                 eopatch = reflectance_task.execute(eopatch)
                 current_feature = "S2_REFLECTANCE"
+                
+            print(f"Final EOPatch after simulation steps: {eopatch}")
 
             # Extract result and save 
             # Remove time dimension: (time, height, width, bands) -> (height, width, bands)
@@ -338,6 +321,7 @@ class SimulationPipeline:
                 dtype=output_data.dtype,
             )
             with rasterio.open(output_tiff_path, "w", **profile) as dst:
+                print(f"Output data shape (height, width, bands): {output_data.shape}")
                 dst.write(output_data)
 
             return True
@@ -370,28 +354,26 @@ class SimulationPipeline:
         return psf_kernels
 
     def batch_simulate_from_source_dir(
-        self, source_dir: Optional[Path | str] = None, pattern: str = "*.tiff", metadata_path: Optional[str] = None
+        self, source_dir: Optional[Path | str] = None, pattern: str = "*.tif",
     ) -> dict:
         """Apply simulation to all S2 .tiff files in a source directory.
 
         Args:
             source_dir: Directory containing raw S2 .tiff files. If None, uses config.s2_source_dir.
             pattern: Glob pattern for .tiff files.
-            metadata_path: Optional path to Sen1Floods metadata GeoJSON file for date extraction.
 
         Returns:
             Dictionary with results: {"successful": [...], "failed": [...]}
         """
         source_dir = Path(source_dir or self.config.s2_source_dir)
+        output_dir = Path(self.config.output_dir) if isinstance(self.config.output_dir, str) else self.config.output_dir
         results = {"successful": [], "failed": []}
         
-        # Try to load metadata if path provided, otherwise None
-        metadata = None
-        if metadata_path:
-            metadata = self._load_sen1floods_metadata(metadata_path)
-        
         for s2_file in sorted(source_dir.glob(pattern)):
-            output_file = self.config.output_dir / f"simulated_{s2_file.name}"
+            # Load metadata file associated with this TIFF
+            metadata = self._load_metadata_from_file(s2_file)
+            
+            output_file = output_dir / f"simulated_{s2_file.name}"
             success = self.simulate_single_file(s2_file, output_file, metadata)
 
             if success:

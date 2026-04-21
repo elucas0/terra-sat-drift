@@ -631,8 +631,6 @@ class CalculateRadianceTransform(ImageOnlyTransform):
             [solar_irradiances.get(band, solar_irradiances["B02"]) for band in band_order[:num_bands]]
         )
         
-        # Calculate radiance: L = reflectance * cos(zenith) * distance^2 / pi * irradiance
-        # More precisely: L = reflectance * irradiance * cos(zenith) / pi * distance^2
         cos_zenith = np.cos(np.radians(sun_zenith))
         factor = cos_zenith * (earth_sun_dist ** 2) / np.pi
         
