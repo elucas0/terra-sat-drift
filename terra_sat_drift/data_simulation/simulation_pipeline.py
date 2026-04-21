@@ -11,12 +11,15 @@ import rasterio
 from scipy.ndimage import gaussian_filter
 import cv2
 import numpy as np
-from skimage.transform import resize
 
 from sentinelhub.geometry import BBox
 from sentinelhub.constants import CRS
 
 from eolearn.core.eodata import EOPatch
+from eolearn.core.eonode import linearly_connect_tasks
+from eolearn.core.eoworkflow import EOWorkflow
+from eolearn.core.core_tasks import RemoveFeatureTask
+from eolearn.io.raster_io import ExportToTiffTask
 from eolearn.core.constants import FeatureType
 from eolearn.core.core_tasks import MapFeatureTask
 from eolearn.features.utils import spatially_resize_image as resize_images
@@ -32,6 +35,7 @@ from phisat2_utils import (
     CalculateReflectanceTask,  
     AlternativePhisatCalculationTask,
     PhisatCalculationTask,
+    
 )
 from phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
 
@@ -159,17 +163,11 @@ class SimulationPipeline:
             # band_indices = [1, 2, 3, 7, 4, 5, 6]
             # s2_data = s2_data[band_indices, :, :]
             
-            # TARGET_10M_SIZE = (512, 512)
-            # if s2_data.shape[1:] != TARGET_10M_SIZE:
-            #     s2_data = resize(s2_data, (len(band_indices), *TARGET_10M_SIZE), 
-            #                     order=1, preserve_range=True, anti_aliasing=True)
-            
             # Transpose from (bands, height, width) to (height, width, bands)
             s2_data = np.transpose(s2_data, (1, 2, 0))
-            print(f"Loaded S2 data with shape {s2_data.shape}")
             
             # Create EOPatch
-            eopatch = EOPatch(bbox=bbox)
+            eopatch = EOPatch(bbox=bbox, timestamps=[datetime.now()])
             
             # Shape: (time, height, width, bands)
             eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
@@ -183,8 +181,6 @@ class SimulationPipeline:
                 print("Skipping radiance conversion - metadata required")
                 self.config.steps.radiance = False
                 
-            print(f"EOPatch with metadata: {eopatch}")
-
             #  Radiance conversion
             if self.config.steps.radiance:
                 radiance_task = CalculateRadianceTask(
@@ -233,9 +229,6 @@ class SimulationPipeline:
                     eopatch = resize_task_list[-1](eopatch)
                     
             current_feature = f"{current_feature}_RES"
-            
-            print(f"Resized features to {NEW_SIZE} for Φ-sat-2 simulation")
-            print(f"EOPatch after resizing: {eopatch}")
             
             # Band misalignment
             if self.config.steps.band_misalignment:
@@ -308,21 +301,49 @@ class SimulationPipeline:
                 eopatch = reflectance_task.execute(eopatch)
                 current_feature = "S2_REFLECTANCE"
                 
-            print(f"Final EOPatch after simulation steps: {eopatch}")
-
-            # Extract result and save 
-            # Remove time dimension: (time, height, width, bands) -> (height, width, bands)
-            output_data = eopatch[FeatureType.DATA, current_feature][0]
-            # Transpose to rasterio format: (bands, height, width)
-            output_data = np.transpose(output_data, (2, 0, 1))
+            # Build conditional list of features to remove based on simulation configuration
+            features_to_remove = [
+                (FeatureType.DATA, "S2_BANDS"),  # Always remove original S2 bands
+            ]
             
-            profile.update(
-                count=output_data.shape[0],
-                dtype=output_data.dtype,
+            # Add conditional removals based on enabled steps
+            if self.config.steps.radiance:
+                features_to_remove.append((FeatureType.DATA, "S2_RADIANCE"))
+            
+            if self.config.steps.add_panchromatic:
+                features_to_remove.extend([
+                    (FeatureType.DATA, "BANDS-RAD-PAN"),
+                    (FeatureType.DATA, "BANDS-RAD-PAN_RES"),
+                ])
+            
+            if self.config.steps.band_misalignment:
+                features_to_remove.append((FeatureType.DATA, "S2_MISALIGNED"))
+            
+            if (self.config.snr_psf_method == "alternative" and 
+                (self.config.steps.snr_simulation or self.config.steps.psf_filtering)):
+                if self.config.steps.snr_simulation:
+                    features_to_remove.append((FeatureType.DATA, "S2_NOISY"))
+                if self.config.steps.psf_filtering:
+                    features_to_remove.append((FeatureType.DATA, "S2_PSF"))
+            
+            if "sunZenithAngles" in eopatch.data:
+                features_to_remove.append((FeatureType.DATA, "sunZenithAngles"))
+                
+            remove_feature_task = RemoveFeatureTask(features_to_remove)
+            eopatch = remove_feature_task.execute(eopatch)
+            
+            casting_task = MapFeatureTask(
+                (FeatureType.DATA, current_feature),
+                (FeatureType.DATA, current_feature),
+                np.float32
             )
-            with rasterio.open(output_tiff_path, "w", **profile) as dst:
-                print(f"Output data shape (height, width, bands): {output_data.shape}")
-                dst.write(output_data)
+            eopatch = casting_task(eopatch)
+              
+            export_task = ExportToTiffTask(
+                feature=(FeatureType.DATA, current_feature),
+                folder=str(output_tiff_path),
+            )
+            export_task.execute(eopatch)
 
             return True
 
@@ -373,7 +394,7 @@ class SimulationPipeline:
             # Load metadata file associated with this TIFF
             metadata = self._load_metadata_from_file(s2_file)
             
-            output_file = output_dir / f"simulated_{s2_file.name}"
+            output_file = output_dir / f"simulated_{self.config.processing_level}_{s2_file.name}"
             success = self.simulate_single_file(s2_file, output_file, metadata)
 
             if success:

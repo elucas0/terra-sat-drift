@@ -30,6 +30,11 @@ from phisat2_constants import (
     S2_PAN_BANDS
 )
 
+from phisat2_utils import (
+    get_shifts_l1b,
+    get_shifts_l1a
+)
+
 from sunpy.coordinates import sun
 from astropy import units as u
 import xml.etree.ElementTree as ET
@@ -38,47 +43,11 @@ class ProcessingLevels:
     """Processing levels for band misalignment simulation."""
     L1A = "L1A"
     L1B = "L1B"
+    L1C = "L1C"
     
 @property
 def targets_as_params(self):
     return self._targets_as_params
-
-def _get_shifts_l1a() -> List[Tuple[float, float]]:
-    """Compute random shifts for L1A level processing.
-    
-    Returns:
-        List of (shift_x, shift_y) tuples for each band
-    """
-    mis_amplitude = np.random.normal(
-        L1A_RAND_MEAN, L1A_RAND_STD, size=(len(S2_PAN_BANDS),)
-    ) + np.array(L1A_RELATIVE_SHIFTS)
-    mis_angle = np.random.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
-
-    shifts = (mis_amplitude * (np.cos(mis_angle), np.sin(mis_angle))).T
-
-    shifts[0, :] = np.array([0.0, 0.0])
-    shifts = np.flip(np.cumsum(shifts, axis=0), axis=0)
-
-    return [tuple(s) for s in shifts]
-
-
-def _get_shifts_l1b(rand_std: int = 1) -> List[Tuple[float, float]]:
-    """Compute random shifts for L1B level processing.
-    
-    Args:
-        rand_std: Standard deviation for random shift amplitude
-        
-    Returns:
-        List of (shift_x, shift_y) tuples for each band
-    """
-    mis_amplitude = np.random.normal(0, rand_std, size=(len(S2_PAN_BANDS),))
-    mis_angle = np.random.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
-
-    shifts = (mis_amplitude * (np.cos(mis_angle), np.sin(mis_angle))).T
-    shifts[2, :] = np.array([0.0, 0.0])
-
-    return [tuple(s) for s in shifts.tolist()]
-
 
 class BandMisalignmentTransform(ImageOnlyTransform):
     """Simulate band misalignment artifacts in multispectral imagery.
@@ -124,9 +93,9 @@ class BandMisalignmentTransform(ImageOnlyTransform):
         
         # Get shift vectors based on processing level
         if self.processing_level == ProcessingLevels.L1A:
-            shift_vectors = _get_shifts_l1a()
+            shift_vectors = get_shifts_l1a()
         else:
-            shift_vectors = _get_shifts_l1b(self.std_sea)
+            shift_vectors = get_shifts_l1b(self.std_sea)
         
         result = []
         for b_idx, (shift_x, shift_y) in enumerate(shift_vectors[:img_band_first.shape[0]]):
@@ -197,8 +166,6 @@ class PanBandTransform(ImageOnlyTransform):
                 # Compute PAN as weighted average
                 pan_band = np.sum(bands * np.array(self.pan_weights) / sum(self.pan_weights), axis=2)
                 # Insert PAN at position 3 to match S2_PAN_BANDS order
-                # Original: [B02, B03, B04, B08, B05, B06, B07]
-                # Result: [B02, B03, B04, PAN, B08, B05, B06, B07]
                 result = np.insert(bands, 3, pan_band, axis=2)
                 return result
             elif img.shape[0] == 7:

@@ -1,4 +1,4 @@
-"""Example usage of Sen1Floods11S2 loader for simulation workflow."""
+"""Example usage of simulation workflow."""
 
 from pathlib import Path
 from simulation_pipeline import SimulationPipeline
@@ -24,7 +24,7 @@ def example_5_simulation_pipeline():
     config = SimulationConfig(
         steps=steps,
         output_dir="tiff_folder/simulated_s2",
-        processing_level="L1A",
+        processing_level="L1C",
         phisat2_exec_path="executables/phisat2_unix.bin",  # Use with snr_psf_method="executable"
         snr_psf_method="executable",  # "alternative" or "executable"
     )
