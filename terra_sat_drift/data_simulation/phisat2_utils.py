@@ -365,7 +365,7 @@ class BandMisalignmentTask(EOTask):
                 band = warpAffine(
                     src=eop_ts_band,
                     M=warp_matrix,
-                    dsize=eop_ts_band.shape,
+                    dsize=(eop_ts_band.shape[1], eop_ts_band.shape[0]),  # (width, height) format for OpenCV
                     flags=self.interpolation_method,
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=0,

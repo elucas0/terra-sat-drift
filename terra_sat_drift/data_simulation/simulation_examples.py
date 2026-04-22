@@ -1,7 +1,8 @@
 """Example usage of simulation workflow."""
 
 from pathlib import Path
-from simulation_pipeline import SimulationPipeline
+from phisat2_constants import ProcessingLevels
+from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
 from sentinelhub.exceptions import SHDeprecationWarning
 import warnings
@@ -23,32 +24,32 @@ def example_5_simulation_pipeline():
 
     config = SimulationConfig(
         steps=steps,
-        output_dir="tiff_folder/simulated_s2",
-        processing_level="L1C",
+        processing_level=ProcessingLevels.L1C,
         phisat2_exec_path="executables/phisat2_unix.bin",  # Use with snr_psf_method="executable"
         snr_psf_method="executable",  # "alternative" or "executable"
     )
 
-    pipeline = SimulationPipeline(config)
     # Print the steps that are on True
-    print(f"Simulating with steps: {[step for step, enabled in steps.__dict__.items() if enabled]}")
+    print(f"Simulating with steps: {[step for step, enabled in steps.__dict__.items() if enabled]} to level {config.processing_level}")
 
     # Note: Set snr_psf_method to:
     #   - "alternative" to use Python-based AlternativePhisatCalculationTask (default)
     #   - "executable" to use compiled phisat2 binary (requires phisat2_exec_path to be set)
 
-    # Note: Uncomment to actually run the simulation
-    success = pipeline.batch_simulate_from_source_dir(
-        source_dir="tiff_folder/s2b_cropped", pattern="*.tif"
+    executor = simulate_with_executor(
+        config=config, 
+        source_dir=Path("/shared/projects/phisat2/data/interim/s2b_croped"),
+        output_dir=Path("/shared/projects/phisat2/data/interim/s2b_simulated"),
+        metadata_dir=Path("/shared/projects/phisat2/data/interim/s2b_merged"),
+        logs_folder="/shared/projects/phisat2/data/index/logs",
+        pattern="*_s2b_cropped.tif",
+        workers=1,
+        save_logs=True,
     )
-    print(f"Success: {success}")
+    print(f"Execution stats: {executor.general_stats}")
 
 
 if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=SHDeprecationWarning)
     warnings.filterwarnings("ignore")
     example_5_simulation_pipeline()
-
-    print("\n" + "=" * 80)
-    print("Examples completed!")
-    print("=" * 80)

@@ -8,401 +8,358 @@ from datetime import datetime
 import numpy as np
 import json
 import rasterio
-from scipy.ndimage import gaussian_filter
 import cv2
-import numpy as np
 
 from sentinelhub.geometry import BBox
 from sentinelhub.constants import CRS
 
+from eolearn.core.eotask import EOTask
 from eolearn.core.eodata import EOPatch
 from eolearn.core.eonode import linearly_connect_tasks
 from eolearn.core.eoworkflow import EOWorkflow
-from eolearn.core.core_tasks import RemoveFeatureTask
+from eolearn.core.eoexecution import EOExecutor
 from eolearn.io.raster_io import ExportToTiffTask
 from eolearn.core.constants import FeatureType
 from eolearn.core.core_tasks import MapFeatureTask
 from eolearn.features.utils import spatially_resize_image as resize_images
-from simulation_config import SimulationConfig, SimulationSteps
+from simulation_config import SimulationConfig
 
-from tqdm import tqdm
-from tqdm import tqdm
 from phisat2_utils import (  
     AddPANBandTask,  
     AddMetadataTask,
     BandMisalignmentTask,  
     CalculateRadianceTask,  
     CalculateReflectanceTask,  
-    AlternativePhisatCalculationTask,
     PhisatCalculationTask,
-    
 )
 from phisat2_constants import S2_RESOLUTION, PHISAT2_RESOLUTION, ProcessingLevels  
 
-class SimulationPipeline:
-    """Orchestrates Φ-sat-2 on-the-fly simulation from cached S2 L1C .tiff files.
+
+def _load_metadata_from_file(tiff_path: Path | str, metadata_dir: Path) -> dict:
+    """Load metadata JSON file associated with a TIFF file.
     
-    This pipeline wraps the phisat2_utils tasks to enable:
-    - Configurable simulation steps (radiance, PAN, misalignment, SNR, PSF, L1C)
-    - Batch processing with EOExecutor
-    - Caching of raw S2 data for scaled experiments
+    Extracts the ID (last part) from the TIFF filename and looks for matching metadata.
+    For example: S2B_Crop_10m_2091.tif -> 2091_S2B_metadata.json
+    
+    Args:
+        tiff_path: Path to the TIFF file
+        metadata_path: Path to the metadata file
+        
+    Returns:
+        Dictionary with metadata (earth_sun_dist, solar_irradiances, sun_zenith_angles),
+        or raises FileNotFoundError if no metadata file found.
     """
-
-    def __init__(self, config: SimulationConfig) -> None:
-        """Initialize pipeline with simulation configuration.
-
-        Args:
-            config: SimulationConfig instance defining processing steps and parameters.
-        """
-        self.config = config
-        output_dir = Path(self.config.output_dir) if isinstance(self.config.output_dir, str) else self.config.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-    def _load_metadata_from_file(self, tiff_path: Path | str) -> dict:
-        """Load metadata JSON file associated with a TIFF file.
-        
-        Extracts the ID (last part) from the TIFF filename and looks for matching metadata.
-        For example: S2B_Crop_10m_2091.tif -> 2091_S2B_metadata.json
-        
-        Args:
-            tiff_path: Path to the TIFF file
-            
-        Returns:
-            Dictionary with metadata (earth_sun_dist, solar_irradiances, sun_zenith_angles),
-            or raises FileNotFoundError if no metadata file found.
-        """
-        tiff_path = Path(tiff_path)
-        stem = tiff_path.stem
-        parent_dir = tiff_path.parent
-        
-        # Extract the ID (last string) by splitting on underscores
-        parts = stem.split('_')
-        if not parts:
-            print(f"Warning: Could not extract ID from filename {tiff_path.name}")
-            raise FileNotFoundError("Could not extract ID from TIFF filename")
-        
-        id_str = parts[-1]
-        satellite = parts[0] if len(parts) > 0 else ""
-        
-        # Try common naming patterns with the extracted ID
-        possible_metadata_paths = [
-            parent_dir / f"{id_str}_{satellite}_metadata.json",
-            parent_dir / f"{id_str}_metadata.json",
-            parent_dir / f"{id_str}.json",
-            parent_dir / f"{stem}_metadata.json",
-            parent_dir / f"{stem}.json",
-        ]
-        
-        for metadata_path in possible_metadata_paths:
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
-                    print(f"✓ Loaded metadata from {metadata_path.name}")
-                    return metadata
-                except json.JSONDecodeError as e:
-                    print(f"Warning: Failed to parse JSON metadata {metadata_path}: {e}")
-                except Exception as e:
-                    print(f"Warning: Error loading metadata file {metadata_path}: {e}")
-        
-        print(f"Warning: No metadata file found for {tiff_path.name} (ID: {id_str})")
-        raise FileNotFoundError("No metadata file found")
-
-    def _create_bbox_from_rasterio(self, src) -> BBox:
-        """Create BBox object from rasterio source.
-            
-        Args:
-            src: Rasterio source object with geospatial info.
-           
-        Returns:
-            BBox object for the raster extent.
-        """
-        # Get the bounds from rasterio
-        bounds = src.bounds
-            
-        # Create BBox (left, bottom, right, top)
-        bbox = BBox(
-            bbox=(bounds.left, bounds.bottom, bounds.right, bounds.top),
-                crs=CRS(src.crs)
-        )
-        return bbox
-
-    def simulate_single_file(
-        self, s2_tiff_path: Path | str, output_tiff_path: Path | str, metadata: dict
-    ) -> bool:
-        """Apply simulation pipeline to a single S2 .tiff file using phisat2_utils tasks.
-
-        This creates an EOPatch from the raw S2 .tiff, applies configurable simulation
-        steps via phisat2_utils tasks, then extracts and saves the result.
-
-        Args:
-            s2_tiff_path: Path to raw S2 .tiff (7 or 8 bands).
-            output_tiff_path: Path to save simulated Φ-sat-2 .tiff.
-
-        Returns:
-            True if successful, False otherwise.
-        """
+    tiff_path = Path(tiff_path)
+    stem = tiff_path.stem
+    
+    # Extract the ID (last string) by splitting on underscores
+    parts = stem.split('_')
+    if not parts:
+        print(f"Warning: Could not extract ID from filename {tiff_path.name}")
+        raise FileNotFoundError("Could not extract ID from TIFF filename")
+    
+    id_str = parts[0]
+    
+    metadata_path_ = metadata_dir / f"{id_str}_S2B_metadata.json"
+    
+    if metadata_path_.exists():
         try:
-            s2_tiff_path = Path(s2_tiff_path)
-            output_tiff_path = Path(output_tiff_path)
-            output_tiff_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(metadata_path_, 'r') as f:
+                metadata = json.load(f)
+            return metadata
+        except json.JSONDecodeError as e:
+            print(f"Warning: Failed to parse JSON metadata {metadata_dir}: {e}")
+        except Exception as e:
+            print(f"Warning: Error loading metadata file {metadata_dir}: {e}")
+    
+    print(f"Warning: No metadata file found for {tiff_path.name} (ID: {id_str})")
+    raise FileNotFoundError("No metadata file found")
 
-            #  Step 0: Load raw S2 and create EOPatch 
-            with rasterio.open(s2_tiff_path) as src:
-                s2_data = src.read().astype(np.float32)  # Shape: (batch, height, width, bands)
-                profile = src.profile.copy()
-                
-                # Extract bbox from geospatial metadata (while file is still open)
-                try:
-                    bbox = self._create_bbox_from_rasterio(src)
-                except Exception as e:
-                    print(f"Warning: Could not extract bbox from {s2_tiff_path}: {e}")
-                    bbox = None
 
-            # Select "B02", "B03", "B04", "B08", "B05", "B06", "B07"
-            # band_indices = [1, 2, 3, 7, 4, 5, 6]
-            # s2_data = s2_data[band_indices, :, :]
-            
-            # Transpose from (bands, height, width) to (height, width, bands)
-            s2_data = np.transpose(s2_data, (1, 2, 0))
-            
-            # Create EOPatch
-            eopatch = EOPatch(bbox=bbox, timestamps=[datetime.now()])
-            
-            # Shape: (time, height, width, bands)
-            eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
+def _create_bbox_from_rasterio(src) -> BBox:
+    """Create BBox object from rasterio source.
+        
+    Args:
+        src: Rasterio source object with geospatial info.
+       
+    Returns:
+        BBox object for the raster extent.
+    """
+    bounds = src.bounds
+    bbox = BBox(
+        bbox=(bounds.left, bounds.bottom, bounds.right, bounds.top),
+        crs=CRS(src.crs)
+    )
+    return bbox
 
-            # Add metadata to EOPatch: Solar irradiance, Earth-Sun distance, Sun zenith angles
+
+class LoadS2FileTask(EOTask):
+    """Load S2 TIFF file and create EOPatch with metadata."""
+
+    def execute(self, *, s2_tiff_path: str, metadata: dict, **kwargs) -> EOPatch:
+        """Load S2 TIFF and initialize EOPatch."""
+        s2_path = Path(s2_tiff_path)
+        
+        with rasterio.open(s2_path) as src:
+            s2_data = src.read().astype(np.float32)
             try:
-                add_meta_task = AddMetadataTask()
-                eopatch = add_meta_task.execute(eopatch, metadata)
+                bbox = _create_bbox_from_rasterio(src)
             except Exception as e:
-                print(f"Warning: Failed to fetch metadata: {e}")
-                print("Skipping radiance conversion - metadata required")
-                self.config.steps.radiance = False
-                
-            #  Radiance conversion
-            if self.config.steps.radiance:
-                radiance_task = CalculateRadianceTask(
-                    (FeatureType.DATA, "S2_BANDS"),
-                    (FeatureType.DATA, "S2_RADIANCE"),
+                print(f"Warning: Could not extract bbox: {e}")
+                bbox = None
+
+        s2_data = np.transpose(s2_data, (1, 2, 0))
+        eopatch = EOPatch(bbox=bbox, timestamps=[datetime.now()])
+        eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
+
+        # Add metadata to EOPatch
+        try:
+            add_meta_task = AddMetadataTask()
+            eopatch = add_meta_task.execute(eopatch, metadata)
+        except Exception as e:
+            print(f"Warning: Failed to fetch metadata: {e}")
+
+        return eopatch
+
+
+class ResamplingTask(EOTask):
+    """Spatially resample bands to Φ-sat-2 pixel size."""
+
+    def __init__(self, pan_feature: str, config: SimulationConfig):
+        self.pan_feature = pan_feature
+        self.config = config
+
+    def execute(self, eopatch: EOPatch) -> EOPatch:
+        features_to_resize = {
+            FeatureType.DATA: [self.pan_feature],
+        }
+        if "sunZenithAngles" in eopatch.data:
+            features_to_resize[FeatureType.DATA].append("sunZenithAngles")
+
+        s2_data_shape = eopatch.data[self.pan_feature].shape
+        new_size = (
+            int((s2_data_shape[1] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
+            int((s2_data_shape[2] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
+        )
+
+        for feature_type in features_to_resize.keys():
+            for feature in features_to_resize[feature_type]:
+                resize_task = MapFeatureTask(
+                    (feature_type, feature),
+                    (feature_type, f"{feature}_RES"),
+                    resize_images,
+                    new_size=new_size,
+                    resize_method="nearest",
                 )
-                eopatch = radiance_task.execute(eopatch)
-                current_feature = "S2_RADIANCE"
-            else:
-                current_feature = "S2_BANDS"
-            
-            #  Add panchromatic band
-            if self.config.steps.add_panchromatic:
-                pan_task = AddPANBandTask(
-                    (FeatureType.DATA, current_feature),
-                    (FeatureType.DATA, "BANDS-RAD-PAN"),
-                )
-                eopatch = pan_task.execute(eopatch)
-                current_feature = "BANDS-RAD-PAN"
-                
-            # Spatial resampling to Φ-sat-2 pixel size
-            if eopatch.data["sunZenithAngles"] is not None:
-                features_to_resize = {
-                    FeatureType.DATA: [current_feature, "sunZenithAngles"],
-                }
-            else:
-                features_to_resize = {
-                    FeatureType.DATA: [current_feature],
-                }
-            
-            NEW_SIZE = (int((s2_data.shape[0] * S2_RESOLUTION) / PHISAT2_RESOLUTION), int((s2_data.shape[1] * S2_RESOLUTION) / PHISAT2_RESOLUTION))
+                eopatch = resize_task(eopatch)
 
-            resize_task_list = []
+        return eopatch
 
-            for feature_type in tqdm(features_to_resize.keys()):
-                for feature in tqdm(features_to_resize[feature_type]):
-                    resize_task_list.append(
-                        MapFeatureTask(
-                            (feature_type, feature),
-                            (feature_type, f"{feature}_RES"),
-                            resize_images,
-                            new_size=NEW_SIZE,
-                            resize_method="nearest",
-                        )
-                    )
-                    eopatch = resize_task_list[-1](eopatch)
-                    
-            current_feature = f"{current_feature}_RES"
-            
-            # Band misalignment
-            if self.config.steps.band_misalignment:
-                processing_level = ProcessingLevels[self.config.processing_level]
-                misalign_task = BandMisalignmentTask(
-                    (FeatureType.DATA, current_feature),
-                    (FeatureType.DATA, "S2_MISALIGNED"),
-                    processing_level=processing_level,
-                    std_sea=6,
-                    interpolation_method=cv2.INTER_NEAREST,
-                )
-                eopatch = misalign_task.execute(eopatch)
-                current_feature = "S2_MISALIGNED"
+def simulate_with_executor(
+    config: SimulationConfig,
+    source_dir: Path,
+    output_dir: Path,
+    metadata_dir: Path,
+    logs_folder: str,
+    pattern: str,
+    workers: int = 4,
+    save_logs: bool = True,
+) -> EOExecutor:
+    """Execute parallel simulation using EOExecutor with decomposed task nodes.
 
-            # SNR + PSF simulation 
-            if self.config.steps.snr_simulation or self.config.steps.psf_filtering:
-                # Check which method to use for SNR/PSF calculation
-                use_executable = (
-                    self.config.snr_psf_method == "executable"
-                    and hasattr(self.config, 'phisat2_exec_path')
-                    and self.config.phisat2_exec_path
-                )
-                
-                if use_executable and self.config.phisat2_exec_path:
-                    # SNR simulation using executable
-                    if self.config.steps.snr_simulation:
-                        snr_task = PhisatCalculationTask(
-                            input_feature=(FeatureType.DATA, current_feature),
-                            output_feature=(FeatureType.DATA, "L_out_SNR"),
-                            executable=self.config.phisat2_exec_path,
-                            calculation="SNR",
-                        )
-                        eopatch = snr_task.execute(eopatch)
-                        current_feature = "L_out_SNR"
-                    
-                    # PSF filtering using executable
-                    if self.config.steps.psf_filtering:
-                        psf_task = PhisatCalculationTask(
-                            input_feature=(FeatureType.DATA, current_feature),
-                            output_feature=(FeatureType.DATA, "L_out_PSF"),
-                            executable=self.config.phisat2_exec_path,
-                            calculation="PSF",
-                        )
-                        eopatch = psf_task.execute(eopatch)
-                        current_feature = "L_out_PSF"
-                elif self.config.snr_values:
-                    # Use AlternativePhisatCalculationTask
+    Creates an EOWorkflow by composing individual simulation tasks with linearly_connect_tasks
+    for parallel execution across multiple workers for all S2 .tiff files in the source directory.
 
-                    # Create PSF kernels (Gaussian approximation)
-                    psf_kernel = self._create_psf_kernels(self.config.psf_kernel_sigma)
+    Args:
+        config: SimulationConfig instance defining processing steps and parameters.
+        source_dir: Directory containing raw S2 .tiff files. If None, uses config.s2_source_dir.
+        pattern: Glob pattern for .tiff files.
+        workers: Number of parallel workers for execution.
+        save_logs: Whether to save execution logs.
 
-                    snr_psf_task = AlternativePhisatCalculationTask(
-                        input_feature=(FeatureType.DATA, current_feature),
-                        snr_feature=(FeatureType.DATA, "S2_NOISY") if self.config.steps.snr_simulation else (FeatureType.DATA, current_feature),
-                        snr_values=self.config.snr_values,
-                        l_ref=self.config.radiance_reference,
-                        psf_feature=(FeatureType.DATA, "S2_PSF"),
-                        psf_kernel=psf_kernel,
-                    )
-                    eopatch = snr_psf_task.execute(eopatch)
-                    current_feature = "S2_PSF"
+    Returns:
+        EOExecutor instance with execution results.
+    """
+    # Collect all TIFF files and their metadata
+    tiff_files = list(source_dir.glob(pattern))
+    tiff_files = tiff_files[:5]  # Limit to first 10 files for testing
+    
+    print(f"Found {len(tiff_files)} TIFF files to process")
 
-            # Reflectance conversion (if L1C) 
-            if self.config.steps.reflectance_conversion and self.config.processing_level == "L1C":
-                reflectance_task = CalculateReflectanceTask(
-                    (FeatureType.DATA, current_feature),
-                    (FeatureType.DATA, "S2_REFLECTANCE"),
-                    processing_level=ProcessingLevels.L1C,
-                )
-                eopatch = reflectance_task.execute(eopatch)
-                current_feature = "S2_REFLECTANCE"
-                
-            # Build conditional list of features to remove based on simulation configuration
-            features_to_remove = [
-                (FeatureType.DATA, "S2_BANDS"),  # Always remove original S2 bands
-            ]
-            
-            # Add conditional removals based on enabled steps
-            if self.config.steps.radiance:
-                features_to_remove.append((FeatureType.DATA, "S2_RADIANCE"))
-            
-            if self.config.steps.add_panchromatic:
-                features_to_remove.extend([
-                    (FeatureType.DATA, "BANDS-RAD-PAN"),
-                    (FeatureType.DATA, "BANDS-RAD-PAN_RES"),
-                ])
-            
-            if self.config.steps.band_misalignment:
-                features_to_remove.append((FeatureType.DATA, "S2_MISALIGNED"))
-            
-            if (self.config.snr_psf_method == "alternative" and 
-                (self.config.steps.snr_simulation or self.config.steps.psf_filtering)):
-                if self.config.steps.snr_simulation:
-                    features_to_remove.append((FeatureType.DATA, "S2_NOISY"))
-                if self.config.steps.psf_filtering:
-                    features_to_remove.append((FeatureType.DATA, "S2_PSF"))
-            
-            if "sunZenithAngles" in eopatch.data:
-                features_to_remove.append((FeatureType.DATA, "sunZenithAngles"))
-                
-            remove_feature_task = RemoveFeatureTask(features_to_remove)
-            eopatch = remove_feature_task.execute(eopatch)
-            
-            casting_task = MapFeatureTask(
-                (FeatureType.DATA, current_feature),
-                (FeatureType.DATA, current_feature),
-                np.float32
+    # Create execution arguments for each file
+    exec_args = []
+    for s2_file in tiff_files:
+        try:
+            metadata = _load_metadata_from_file(s2_file, metadata_dir)
+            output_file = output_dir / f"simulated_{config.processing_level.name}_{s2_file.name}"
+
+            exec_args.append({
+                "s2_tiff_path": str(s2_file),
+                "output_tiff_path": str(output_file),
+                "metadata": metadata,
+            })
+        except FileNotFoundError as e:
+            print(f"Skipping {s2_file.name}: {e}")
+            continue
+
+    if not exec_args:
+        raise ValueError(f"No valid files with metadata found in {source_dir}")
+
+    print(f"\nPrepared {len(exec_args)} execution arguments")
+
+    # Build individual task nodes to be connected with linearly_connect_tasks
+    task_list = []
+
+    # Task 1: Load S2 TIFF file and create EOPatch with metadata
+    task_list.append(LoadS2FileTask())
+
+    # Task 2: Radiance conversion (if enabled)
+    if config.steps.radiance:
+        task_list.append(
+            CalculateRadianceTask(
+                (FeatureType.DATA, "S2_BANDS"),
+                (FeatureType.DATA, "S2_RADIANCE"),
             )
-            eopatch = casting_task(eopatch)
-              
-            export_task = ExportToTiffTask(
-                feature=(FeatureType.DATA, current_feature),
-                folder=str(output_tiff_path),
+        )
+
+    # Task 3: Add panchromatic band (if enabled)
+    if config.steps.add_panchromatic:
+        current_input = "S2_RADIANCE" if config.steps.radiance else "S2_BANDS"
+        task_list.append(
+            AddPANBandTask(
+                (FeatureType.DATA, current_input),
+                (FeatureType.DATA, "BANDS-RAD-PAN"),
             )
-            export_task.execute(eopatch)
+        )
 
-            return True
+    # Task 4: Spatial resampling (if any processing step requires it)
+    if config.steps.add_panchromatic or config.steps.band_misalignment:
+        pan_feature = "BANDS-RAD-PAN" if config.steps.add_panchromatic else (
+            "S2_RADIANCE" if config.steps.radiance else "S2_BANDS"
+        )
+        task_list.append(ResamplingTask(pan_feature, config))
 
-        except Exception as exc:
-            print(f"Error simulating {s2_tiff_path}: {exc}")
-            import traceback
-            traceback.print_exc()
-            return False
+    # Task 5: Band misalignment (if enabled)
+    if config.steps.band_misalignment:
+        pan_feature_res = (
+            "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
+                "S2_RADIANCE_RES" if config.steps.radiance else "S2_BANDS_RES"
+            )
+        )
+        task_list.append(
+            BandMisalignmentTask(
+                (FeatureType.DATA, pan_feature_res),
+                (FeatureType.DATA, "S2_MISALIGNED"),
+                processing_level=ProcessingLevels.L1C,
+                std_sea=6,
+                interpolation_method=cv2.INTER_NEAREST,
+            )
+        )
 
-    def _create_psf_kernels(self, sigma) -> dict:
-        """Create PSF kernels for all Φ-sat-2 bands using Gaussian approximation.
+    # Task 6: SNR simulation (if enabled and using executable)
+    if (config.steps.snr_simulation and 
+        config.snr_psf_method == "executable" and 
+        config.phisat2_exec_path):
         
-        Returns:
-            Dictionary mapping band names to 7x7 PSF kernels.
-        """
+        input_feature = "S2_MISALIGNED" if config.steps.band_misalignment else (
+            "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
+                "S2_RADIANCE_RES" if config.steps.radiance else "S2_BANDS_RES"
+            )
+        )
+        task_list.append(
+            PhisatCalculationTask(
+                input_feature=(FeatureType.DATA, input_feature),
+                output_feature=(FeatureType.DATA, "L_out_SNR"),
+                executable=config.phisat2_exec_path,
+                calculation="SNR",
+            )
+        )
 
-        kernel_bands = ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"]
-        psf_kernels = {}
-
-        for band in kernel_bands:
-            # Create a 7x7 Gaussian kernel with sigma parameter
-            kernel = np.zeros((7, 7))
-            kernel[3, 3] = 1
-            kernel = gaussian_filter(kernel, sigma)
-            # Normalize
-            kernel = kernel / kernel.sum()
-            psf_kernels[band] = kernel
-
-        return psf_kernels
-
-    def batch_simulate_from_source_dir(
-        self, source_dir: Optional[Path | str] = None, pattern: str = "*.tif",
-    ) -> dict:
-        """Apply simulation to all S2 .tiff files in a source directory.
-
-        Args:
-            source_dir: Directory containing raw S2 .tiff files. If None, uses config.s2_source_dir.
-            pattern: Glob pattern for .tiff files.
-
-        Returns:
-            Dictionary with results: {"successful": [...], "failed": [...]}
-        """
-        source_dir = Path(source_dir or self.config.s2_source_dir)
-        output_dir = Path(self.config.output_dir) if isinstance(self.config.output_dir, str) else self.config.output_dir
-        results = {"successful": [], "failed": []}
+    # Task 7: PSF filtering (if enabled and using executable)
+    if (config.steps.psf_filtering and 
+        config.snr_psf_method == "executable" and 
+        config.phisat2_exec_path):
         
-        for s2_file in sorted(source_dir.glob(pattern)):
-            # Load metadata file associated with this TIFF
-            metadata = self._load_metadata_from_file(s2_file)
-            
-            output_file = output_dir / f"simulated_{self.config.processing_level}_{s2_file.name}"
-            success = self.simulate_single_file(s2_file, output_file, metadata)
+        input_feature = "L_out_SNR" if config.steps.snr_simulation else (
+            "S2_MISALIGNED" if config.steps.band_misalignment else (
+                "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
+                    "S2_RADIANCE_RES" if config.steps.radiance else "S2_BANDS_RES"
+                )
+            )
+        )
+        task_list.append(
+            PhisatCalculationTask(
+                input_feature=(FeatureType.DATA, input_feature),
+                output_feature=(FeatureType.DATA, "L_out_PSF"),
+                executable=config.phisat2_exec_path,
+                calculation="PSF",
+            )
+        )
 
-            if success:
-                results["successful"].append(str(output_file))
-                print(f"✓ Simulated: {s2_file.name}")
-            else:
-                results["failed"].append(str(s2_file))
-                print(f"✗ Failed: {s2_file.name}")
+    # Task 8: Reflectance conversion (if L1C and enabled)
+    if config.steps.reflectance_conversion and config.processing_level == "L1C":
+        input_feature = "L_out_PSF" if config.steps.psf_filtering else (
+            "L_out_SNR" if config.steps.snr_simulation else (
+                "S2_MISALIGNED" if config.steps.band_misalignment else (
+                    "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
+                        "S2_RADIANCE_RES" if config.steps.radiance else "S2_BANDS_RES"
+                    )
+                )
+            )
+        )
+        task_list.append(
+            CalculateReflectanceTask(
+                (FeatureType.DATA, input_feature),
+                (FeatureType.DATA, "S2_REFLECTANCE"),
+                processing_level=config.processing_level,
+            )
+        )
+        
+    # Determine which feature to export
+    if config.steps.reflectance_conversion and config.processing_level == "L1C":
+        export_feature = "S2_REFLECTANCE"
+    elif config.steps.psf_filtering:
+        export_feature = "L_out_PSF"
+    elif config.steps.snr_simulation:
+        export_feature = "L_out_SNR"
+    else:
+        export_feature = "S2_BANDS"
 
-        print(f"\nSummary: {len(results['successful'])} successful, {len(results['failed'])} failed")
-        return results
+    # Task 9: Export to TIFF (final task)
+    task_list.append(ExportToTiffTask(
+        feature=(FeatureType.DATA, export_feature),
+        folder=str(output_dir),
+        image_dtype=np.float32
+    ))
+
+    # Connect all tasks with linearly_connect_tasks
+    nodes = linearly_connect_tasks(*task_list)
+    workflow = EOWorkflow(nodes)
+
+    # Prepare execution kwargs
+    execution_kwargs = [
+        {
+            nodes[0]: {
+                "s2_tiff_path": args["s2_tiff_path"],
+                "metadata": args["metadata"],
+            },
+            nodes[-1]: {
+                "filename": args["output_tiff_path"],
+            }
+        }
+        for args in exec_args
+    ]
+    
+    # Create and configure EOExecutor
+    executor = EOExecutor(
+        workflow=workflow,
+        execution_kwargs=execution_kwargs,
+        save_logs=save_logs,
+        logs_folder=logs_folder,
+    )
+
+    print(f"\nStarting parallel execution with {workers} workers...")
+    executor.run(workers=workers)
+
+    print(f"\nExecution complete. Total tasks: {len(exec_args)}")
+    return executor
