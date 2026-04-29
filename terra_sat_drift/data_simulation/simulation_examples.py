@@ -1,6 +1,7 @@
 """Example usage of simulation workflow."""
 
 from pathlib import Path
+from check_simulation import check_simulation_status
 from phisat2_constants import ProcessingLevels
 from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
@@ -8,10 +9,6 @@ from sentinelhub.exceptions import SHDeprecationWarning
 import warnings
 
 def example_5_simulation_pipeline():
-    """Example 5: Simulate a single S2 file using the pipeline."""
-    print("\n" + "=" * 80)
-    print("Example 5: Simulating S2 file with pipeline")
-    print("=" * 80)
     # Configure pipeline
     steps = SimulationSteps(
         radiance=True,
@@ -45,8 +42,15 @@ def example_5_simulation_pipeline():
         pattern="*_s2b_cropped.tif",
         workers=1,
         save_logs=True,
+        status_csv="/shared/projects/phisat2/data/index/simulation_status_report.csv",
     )
     print(f"Execution stats: {executor.general_stats}")
+    
+    check_simulation_status(
+        input_dir="/shared/projects/phisat2/data/interim/s2b_croped",
+        output_dir="/shared/projects/phisat2/data/interim/s2b_simulated",
+        output_csv="/shared/projects/phisat2/data/index/simulation_status_report.csv"
+    )
 
 
 if __name__ == "__main__":

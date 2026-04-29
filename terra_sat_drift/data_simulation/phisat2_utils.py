@@ -14,8 +14,10 @@ import numpy as np
 import shapely.geometry
 import shapely.ops
 from cv2 import warpAffine
+from eolearn.features.utils import ResizeMethod, spatially_resize_image
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
+from simulation_config import SimulationConfig
 from phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
@@ -24,6 +26,7 @@ from phisat2_constants import (
     L1A_RELATIVE_SHIFTS,
     PAN_WEIGHTS,
     PHISAT2_RESOLUTION,
+    S2_RESOLUTION,
     S2_BANDS,
     S2_PAN_BANDS,
     WORLD_GDF,
@@ -36,11 +39,9 @@ from sentinelhub import (
     SHConfig,
     parse_time,
     pixel_to_utm,
+    CRS,
 )
-import requests
-import pandas as pd
-from sunpy.coordinates import sun
-from astropy import units as u
+import rasterio
 
 
 class AlternativePhisatCalculationTask(EOTask):
@@ -695,3 +696,88 @@ class ExportGridToTiff(EOTask):
             del temp_eop
 
         return eopatch
+
+
+class LoadS2FileTask(EOTask):
+    """Load S2 TIFF file and create EOPatch with metadata."""
+
+    def execute(self, *, s2_tiff_path: str, metadata: dict, **kwargs) -> EOPatch:
+        """Load S2 TIFF and initialize EOPatch."""
+        s2_path = Path(s2_tiff_path)
+        
+        with rasterio.open(s2_path) as src:
+            s2_data = src.read().astype(np.float32)
+            try:
+                bbox = _create_bbox_from_rasterio(src)
+            except Exception as e:
+                print(f"Warning: Could not extract bbox: {e}")
+                bbox = None
+
+        s2_data = np.transpose(s2_data, (1, 2, 0))
+        eopatch = EOPatch(bbox=bbox, timestamps=[datetime.now()])
+        eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
+
+        # Add metadata to EOPatch
+        try:
+            add_meta_task = AddMetadataTask()
+            eopatch = add_meta_task.execute(eopatch, metadata)
+        except Exception as e:
+            print(f"Warning: Failed to fetch metadata: {e}")
+
+        return eopatch
+    
+class ResamplingTask(EOTask):
+    """Spatially resample bands to Φ-sat-2 pixel size."""
+
+    def __init__(self, pan_feature: str, config: SimulationConfig):
+        self.pan_feature = pan_feature
+        self.config = config
+
+    def execute(self, eopatch: EOPatch) -> EOPatch:
+        features_to_resize = {
+            FeatureType.DATA: [self.pan_feature],
+        }
+        if "sunZenithAngles" in eopatch.data:
+            features_to_resize[FeatureType.DATA].append("sunZenithAngles")
+
+        s2_data_shape = eopatch.data[self.pan_feature].shape
+        new_size = (
+            int((s2_data_shape[1] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
+            int((s2_data_shape[2] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
+        )
+        
+        new_size_cv2 = (new_size[0], new_size[1]) # cv2 uses (width, height)
+
+        for feat_name in features_to_resize[FeatureType.DATA]:
+            data = eopatch[FeatureType.DATA, feat_name]
+            
+            resampled_list = []
+            for t in range(data.shape[0]):
+                resampled_img = spatially_resize_image(
+                    data[t],
+                    new_size=new_size_cv2,
+                    resize_method=ResizeMethod.NEAREST,
+                ).astype(np.float32)
+                if resampled_img.ndim == 2:
+                    resampled_img = resampled_img[..., np.newaxis].astype(np.float32)
+                resampled_list.append(resampled_img)
+            
+            eopatch[FeatureType.DATA, f"{feat_name}_RES"] = np.array(resampled_list)
+
+        return eopatch
+
+def _create_bbox_from_rasterio(src) -> BBox:
+    """Create BBox object from rasterio source.
+        
+    Args:
+        src: Rasterio source object with geospatial info.
+       
+    Returns:
+        BBox object for the raster extent.
+    """
+    bounds = src.bounds
+    bbox = BBox(
+        bbox=(bounds.left, bounds.bottom, bounds.right, bounds.top),
+        crs=CRS(src.crs)
+    )
+    return bbox
