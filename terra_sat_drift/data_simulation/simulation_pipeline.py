@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import json
 import cv2
+from datetime import datetime
 
 from eolearn.core.eonode import linearly_connect_tasks
 from eolearn.core.eoworkflow import EOWorkflow
@@ -15,7 +16,6 @@ from eolearn.core.constants import FeatureType
 from simulation_config import SimulationConfig
 import pandas as pd
 from eolearn.core.core_tasks import RemoveFeatureTask
-from check_simulation_task import CheckSimulationTask
 
 from phisat2_utils import (  
     AddPANBandTask,  
@@ -69,14 +69,59 @@ def _load_metadata_from_file(tiff_path: Path | str, metadata_dir: Path) -> dict:
     print(f"Warning: No metadata file found for {tiff_path.name} (ID: {id_str})")
     raise FileNotFoundError("No metadata file found")
 
+def _get_acquisition_date_from_country(s2_tiff_path: Path | str, metadata: dict) -> Optional[datetime]:
+    """Extract acquisition date from Sen1Floods11 metadata by matching bbox coordinates.
+        
+     Matches the center point of the bbox against the geometry polygons in the metadata.
+        
+    Args:
+        s2_tiff_path: Path to the S2 .tiff file.
+        metadata: Loaded geojson metadata dictionary.
+            
+    Returns:
+        datetime object with the acquisition date, or None if no match found.
+        """
+    if metadata is None or "features" not in metadata:
+        print("Warning: No valid metadata provided for acquisition date extraction")
+        
+    try:
+        # Get the location name from the path
+        location_name = Path(s2_tiff_path).stem.split("_")[0].lower()
+            
+        print(location_name)
+        # Search through features to find location of the acquisition
+        for feature in metadata.get("features", []):
+            properties = feature.get("properties", {})
+            location_property = properties.get("location", "").lower()
+            if location_property == location_name:
+                s2_date_str = properties.get("s2_date")
+                if s2_date_str:
+                    # Parse date string (format: "YYYY/MM/DD")
+                    date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
+                    location = properties.get("location", "Unknown")
+                    return date_obj
+            elif location_property == "cambodia" and location_name == "mekong":
+                # Special case for Cambodia where location name is inconsistent
+                s2_date_str = properties.get("s2_date")
+                if s2_date_str:
+                    date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
+                    return date_obj
+        print(f"Warning: No matching metadata found for this location: {location_name}")
+        return None
+    except Exception as e:
+        print(f"Warning: Error matching path {s2_tiff_path} to metadata: {e}")
+        return None
+
 
 def simulate_with_executor(
     config: SimulationConfig,
-    source_dir: Path,
-    output_dir: Path,
-    metadata_dir: Path,
+    output_dir: str,
     logs_folder: str,
-    pattern: str,
+    source_dir: Path | None = None,
+    tiff_files: list[Path] | None = None,
+    pattern: str | None = None,
+    metadata_file: dict | None = None,
+    metadata_dir: Path | None = None,
     workers: int = 4,
     save_logs: bool = True,
     status_csv: Path | str | None = None,
@@ -88,7 +133,7 @@ def simulate_with_executor(
 
     Args:
         config: SimulationConfig instance defining processing steps and parameters.
-        source_dir: Directory containing raw S2 .tiff files. If None, uses config.s2_source_dir.
+        source_dir: Directory containing raw S2 .tiff files.
         pattern: Glob pattern for .tiff files.
         workers: Number of parallel workers for execution.
         save_logs: Whether to save execution logs.
@@ -109,34 +154,55 @@ def simulate_with_executor(
         else:
             print(f"Warning: Status CSV not found at {status_csv}")
     
-    # Collect all TIFF files and their metadata
-    tiff_files = list(source_dir.glob(pattern))    
-    
+    input_tiff_files = []
+    # Collect all TIFF files using the source directory and pattern, or from provided list
+    if source_dir is not None:
+        # Source dir pattern to filter files
+        if pattern is not None:
+            input_tiff_files = list(source_dir.glob(pattern))
+        else:
+            input_tiff_files = list(source_dir.glob("*.tif"))
+    elif tiff_files is not None:
+        input_tiff_files.extend(tiff_files)
+    else :
+        raise ValueError("Either source_dir or tiff_files must be provided")
+        
     # Filter files by failed product IDs if CSV was provided
     if failed_product_ids:
-        tiff_files = [f for f in tiff_files if any(pid in f.name for pid in failed_product_ids)]
-        print(f"Filtered to {len(tiff_files)} FAILED product TIFF files")
+        input_tiff_files = [f for f in input_tiff_files if any(pid in f.name for pid in failed_product_ids)]
+        print(f"Filtered to {len(input_tiff_files)} FAILED product TIFF files")
     else:
-        print(f"Found {len(tiff_files)} TIFF files to process")
+        print(f"Found {len(input_tiff_files)} TIFF files to process")
 
     # Sort files by product ID descently for consistent processing order
-    tiff_files.sort(key=lambda f: int(f.stem.split('_')[0]), reverse=True)
-    
-    print(tiff_files)
-    
+    # input_tiff_files.sort(key=lambda f: int(f.stem.split('_')[0]), reverse=True)    
     
     # Create execution arguments for each file
     exec_args = []
-    for s2_file in tiff_files:
+    metadata = None
+    acquisition_date = None
+    for s2_file in input_tiff_files:
         try:
-            metadata = _load_metadata_from_file(s2_file, metadata_dir)
-            output_file = output_dir / f"simulated_{config.processing_level.name}_{s2_file.name}"
+            s2_file_name =  s2_file.name
+            # Load metadata for this file (when metadata for radiance is already present)
+            if metadata_dir:
+                metadata = _load_metadata_from_file(s2_file, metadata_dir)
+                # We don't need to put the date of the acquisition but EOPatch requires a timestamp
+                acquisition_date = datetime.now()
+            elif metadata_file:
+                acquisition_date = _get_acquisition_date_from_country(s2_file, metadata_file)
+            else:
+                raise ValueError("Either metadata_file or metadata_dir must be provided to load metadata for simulation")
+
+            output_file = f"{output_dir}/simulated_{config.processing_level.name}_{s2_file_name}"
 
             exec_args.append({
                 "s2_tiff_path": str(s2_file),
-                "output_tiff_path": str(output_file),
+                "output_tiff_path": output_file,
                 "metadata": metadata,
+                "acquisition_date": acquisition_date
             })
+            print(exec_args)
         except FileNotFoundError as e:
             print(f"Skipping {s2_file.name}: {e}")
             continue
@@ -293,7 +359,7 @@ def simulate_with_executor(
     # Task 9: Export to TIFF (final task)
     task_list.append(ExportToTiffTask(
         feature=(FeatureType.DATA, export_feature),
-        folder=str(output_dir),
+        path=str(output_dir),
         image_dtype=np.float32
     ))
 
@@ -307,6 +373,7 @@ def simulate_with_executor(
             nodes[0]: {
                 "s2_tiff_path": args["s2_tiff_path"],
                 "metadata": args["metadata"],
+                "acquisition_date": args["acquisition_date"]
             },
             nodes[-1]: {
                 "filename": args["output_tiff_path"],

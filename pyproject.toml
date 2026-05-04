@@ -10,6 +10,7 @@ dependencies = [
     "opencv-python>=4.13.0.92",
     "sentinelhub[aws]>=3.8.3",
     "setuptools==69.5.1",
+    "sunpy>=7.0.5",
     "terratorch>=1.2.4",
     "torchgeo>=0.7.0",
 ]

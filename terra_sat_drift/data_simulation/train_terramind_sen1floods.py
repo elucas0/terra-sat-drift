@@ -13,9 +13,9 @@ from terratorch.datamodules.sen1floods11 import Sen1Floods11NonGeoDataModule
 from terratorch.tasks import SemanticSegmentationTask
 from terratorch import BACKBONE_REGISTRY
 
-from phisat2_constants import S2_BANDS_NAMES, S2_BANDS
-
+from phisat2_constants import S2_BANDS_NAMES, S2_BANDS, ProcessingLevels
 from phisat2_albumentations import create_phisat2_transform
+from simulation_config import SimulationConfig, SimulationSteps
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +298,11 @@ def main():
     
     # Phisat-2 augmentation arguments
     parser.add_argument(
+        "--apply_spatial_resampling",
+        action="store_true",
+        help="Apply spatial resampling from 10m to 4.75m resolution",
+    )
+    parser.add_argument(
         "--apply_band_misalignment",
         action="store_true",
         help="Apply band misalignment transform",
@@ -320,8 +325,8 @@ def main():
     parser.add_argument(
         "--processing_level",
         type=str,
-        default="L1A",
-        choices=["L1A", "L1B"],
+        default="L1C",
+        choices=["L1A", "L1B", "L1C"],
         help="Processing level for band misalignment",
     )
     
@@ -358,28 +363,51 @@ def main():
         use_amp=not args.no_amp,
     )
     
-    # Build phisat configuration
+    # Build SimulationConfig from command-line arguments
+    simulation_steps = SimulationSteps(
+        spatial_resampling=args.apply_spatial_resampling,
+        radiance=True,  # Radiance is generally included
+        add_panchromatic=args.apply_pan_band,
+        band_misalignment=args.apply_band_misalignment,
+        snr_simulation=args.apply_snr,
+        psf_filtering=args.apply_psf,
+        reflectance_conversion=False,  # Not typically applied in training pipeline
+    )
+    
+    simulation_config = SimulationConfig(
+        steps=simulation_steps,
+        phisat2_exec_path=args.psf_executable if args.apply_psf else None,
+        snr_psf_method="executable" if args.psf_executable else "alternative",
+        processing_level=ProcessingLevels(args.processing_level),
+        misalignment_std_sea=6,
+    )
+    
+    # Convert SimulationConfig to phisat_config dictionary for albumentations transforms
     phisat_config = {
-        "apply_radiance_calculation": True,
-        "apply_band_misalignment": True,
-        "apply_pan_band": True,
-        "apply_psf": True,
-        "apply_snr": True,
-        "processing_level": "L1A",
-        "psf_executable": "./executables/phisat2_unix.bin",
-        "snr_executable": "./executables/phisat2_unix.bin",
+        "apply_spatial_resampling": simulation_steps.spatial_resampling,
+        "apply_radiance_calculation": simulation_steps.radiance,
+        "apply_band_misalignment": simulation_steps.band_misalignment,
+        "apply_pan_band": simulation_steps.add_panchromatic,
+        "apply_psf": simulation_steps.psf_filtering,
+        "apply_snr": simulation_steps.snr_simulation,
+        "processing_level": simulation_config.processing_level.value,
+        "std_sea": simulation_config.misalignment_std_sea,
+        "psf_sigma": simulation_config.psf_kernel_sigma,
+        "l_ref": simulation_config.radiance_reference,
+        "snr_values": simulation_config.snr_values,
     }
     
-    # # Add executables if provided
-    # if args.psf_executable:
-    #     phisat_config["psf_executable"] = args.psf_executable
-    #     logger.info(f"Using PSF executable: {args.psf_executable}")
+    # Add executables if configured
+    if args.psf_executable and args.apply_psf:
+        phisat_config["psf_executable"] = args.psf_executable
+        logger.info(f"Using PSF executable: {args.psf_executable}")
     
-    # if args.snr_executable:
-    #     phisat_config["snr_executable"] = args.snr_executable
-    #     logger.info(f"Using SNR executable: {args.snr_executable}")
+    if args.snr_executable and args.apply_snr:
+        phisat_config["snr_executable"] = args.snr_executable
+        logger.info(f"Using SNR executable: {args.snr_executable}")
     
-    logger.info(f"Phisat-2 config: {phisat_config}")
+    logger.info(f"Simulation config: {simulation_config}")
+    logger.info(f"Phisat-2 transforms config: {phisat_config}")
     
     # Create datamodule
     datamodule = trainer.create_datamodule(

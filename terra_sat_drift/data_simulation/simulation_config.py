@@ -12,6 +12,7 @@ from phisat2_constants import ProcessingLevels
 class SimulationSteps:
     """Control which simulation steps are applied."""
 
+    spatial_resampling: bool = True  # Resample from 10m to 4.75m resolution
     radiance: bool = True
     add_panchromatic: bool = True
     band_misalignment: bool = True
@@ -21,6 +22,7 @@ class SimulationSteps:
 
     def as_dict(self) -> dict:
         return {
+            "spatial_resampling": self.spatial_resampling,
             "radiance": self.radiance,
             "add_panchromatic": self.add_panchromatic,
             "band_misalignment": self.band_misalignment,

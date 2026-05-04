@@ -27,7 +27,8 @@ from phisat2_constants import (
     L1A_RAND_STD, 
     PAN_WEIGHTS, 
     S2_BANDS,
-    S2_PAN_BANDS
+    S2_PAN_BANDS,
+    ProcessingLevels
 )
 
 from phisat2_utils import (
@@ -35,15 +36,11 @@ from phisat2_utils import (
     get_shifts_l1a
 )
 
-from sunpy.coordinates import sun
+from datetime import datetime
+from sunpy.coordinates import sun as sun_coords
+from astropy import units as u_astropy
 from astropy import units as u
 import xml.etree.ElementTree as ET
-
-class ProcessingLevels:
-    """Processing levels for band misalignment simulation."""
-    L1A = "L1A"
-    L1B = "L1B"
-    L1C = "L1C"
     
 @property
 def targets_as_params(self):
@@ -92,7 +89,7 @@ class BandMisalignmentTransform(ImageOnlyTransform):
             return img
         
         # Get shift vectors based on processing level
-        if self.processing_level == ProcessingLevels.L1A:
+        if self.processing_level.value == ProcessingLevels.L1A.value:
             shift_vectors = get_shifts_l1a()
         else:
             shift_vectors = get_shifts_l1b(self.std_sea)
@@ -390,6 +387,73 @@ class SNRNoiseTransform(ImageOnlyTransform):
         return ("executable", "snr_values", "l_ref")
 
 
+class ResamplingTransform(ImageOnlyTransform):
+    """Spatially resample multispectral bands from S2 resolution (10m) to Φ-sat-2 resolution (4.75m).
+    
+    Scales spatial dimensions by factor: S2_RESOLUTION / PHISAT2_RESOLUTION = 10 / 4.75 ≈ 2.105
+    Uses nearest-neighbor interpolation (consistent with ResamplingTask from phisat2_utils).
+    """
+
+    def __init__(
+        self,
+        s2_resolution: float = 10.0,
+        phisat2_resolution: float = 4.75,
+        interpolation: int = cv2.INTER_NEAREST,
+        always_apply: bool = False,
+    ):
+        """Initialize resampling transform.
+        
+        Args:
+            s2_resolution: Original Sentinel-2 resolution in meters (default: 10m)
+            phisat2_resolution: Target Φ-sat-2 resolution in meters (default: 4.75m)
+            interpolation: OpenCV interpolation method (default: INTER_NEAREST)
+            always_apply: Whether to always apply
+        """
+        super().__init__(always_apply)
+        self.s2_resolution = s2_resolution
+        self.phisat2_resolution = phisat2_resolution
+        self.interpolation = interpolation
+        self.scale_factor = s2_resolution / phisat2_resolution
+
+    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        """Apply spatial resampling to image.
+        
+        Args:
+            img: Input image with spatial dimensions (H, W, C) or (C, H, W)
+            **params: Additional parameters from albumentations
+            
+        Returns:
+            Resampled image with scaled spatial dimensions
+        """
+        if img.ndim == 3:
+            # Determine format: (H, W, C) or (C, H, W)
+            if img.shape[2] <= 16:  # Likely (H, W, C) - channels last
+                h, w, c = img.shape
+                new_h = int(h * self.scale_factor)
+                new_w = int(w * self.scale_factor)
+                resampled = cv2.resize(img, (new_w, new_h), interpolation=self.interpolation)
+                return resampled.astype(img.dtype)
+            else:  # Likely (C, H, W) - channels first
+                c, h, w = img.shape
+                new_h = int(h * self.scale_factor)
+                new_w = int(w * self.scale_factor)
+                # Transpose to (H, W, C) for cv2.resize
+                img_hwc = np.transpose(img, (1, 2, 0))
+                resampled_hwc = cv2.resize(img_hwc, (new_w, new_h), interpolation=self.interpolation)
+                # Transpose back to (C, H, W)
+                resampled = np.transpose(resampled_hwc, (2, 0, 1))
+                return resampled.astype(img.dtype)
+        else:
+            # For 2D images, resize directly
+            new_h = int(img.shape[0] * self.scale_factor)
+            new_w = int(img.shape[1] * self.scale_factor)
+            resampled = cv2.resize(img, (new_w, new_h), interpolation=self.interpolation)
+            return resampled.astype(img.dtype)
+
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
+        return ("s2_resolution", "phisat2_resolution", "interpolation")
+
+
 class CalculateRadianceTransform(ImageOnlyTransform):
     """Calculate radiances from reflectances using solar irradiance and Earth-Sun distance.
     
@@ -494,10 +558,6 @@ class CalculateRadianceTransform(ImageOnlyTransform):
         """
         try:
             if len(temporal_coords.shape) == 2 and temporal_coords.shape[0] > 0:
-                from datetime import datetime
-                from sunpy.coordinates import sun as sun_coords
-                from astropy import units as u_astropy
-                
                 year = int(temporal_coords[0, 0])
                 day_of_year = int(temporal_coords[0, 1])
                 # Create datetime from year and day of year
@@ -637,6 +697,51 @@ def _create_gaussian_psf_kernels(num_bands: int = 8, sigma: float = 1.0) -> Dict
     # Return same kernel for all bands (can be customized per band)
     return {i: kernel for i in range(num_bands)}
 
+@staticmethod
+    def _fetch_metadata_from_copernicus(product: Dict) -> Dict:
+        """Fetch metadata for a product using the complete S3 path from Copernicus API.
+        
+        :param product: Product dictionary from Copernicus API
+        :return: Metadata dictionary with XML root and product info
+        """
+        # Get the complete S3 path from the product
+        s3_path = product.get("S3Path", "")
+        product_id = product.get("Id", "")
+        
+        if not s3_path:
+            raise ValueError(f"No S3Path found for product {product_id}")
+        
+        local_safe_path = s3_path.rstrip("/")
+        
+        if not os.path.exists(local_safe_path):
+            raise FileNotFoundError(
+                f"SAFE product not found at {local_safe_path} for product {product_id}"
+            )
+        
+        # Construct the metadata file path
+        metadata_file = os.path.join(local_safe_path, "MTD_MSIL2A.xml")
+        if not os.path.exists(metadata_file):
+            # Try L1C metadata file instead
+            metadata_file = os.path.join(local_safe_path, "MTD_MSIL1C.xml")
+        
+        if not os.path.exists(metadata_file):
+            raise FileNotFoundError(
+                f"Metadata file not found at {local_safe_path} (tried MTD_MSIL2A.xml and MTD_MSIL1C.xml)"
+            )
+        
+        # Parse the XML file
+        tree = ET.parse(metadata_file)
+        root = tree.getroot()
+        
+        metadata_info = {
+            "product_id": product_id,
+            "safe_path": local_safe_path,
+            "xml_root": root,
+            "product": product
+        }
+        
+        return metadata_info
+
 
 def create_phisat2_transform(
     phisat_config: Dict[str, Any] | None = None,
@@ -649,11 +754,14 @@ def create_phisat2_transform(
     
     Args:
         phisat_config: Configuration dictionary with keys:
+            - apply_spatial_resampling (bool): Resample from 10m to 4.75m resolution
             - apply_radiance_calculation (bool): Calculate radiances from reflectances
             - apply_band_misalignment (bool): Apply band misalignment
             - apply_pan_band (bool): Create panchromatic band
             - apply_psf (bool): Apply PSF kernel convolution
             - apply_snr (bool): Apply SNR noise
+            - s2_resolution (float): Original S2 resolution in meters (default: 10.0)
+            - phisat2_resolution (float): Target Φ-sat-2 resolution in meters (default: 4.75)
             - processing_level (str): "L1A" or "L1B" for misalignment
             - psf_sigma (float): Sigma for Gaussian PSF kernels
             - psf_executable (str): Path to PSF executable (optional)
@@ -669,6 +777,7 @@ def create_phisat2_transform(
         
     Example:
         >>> config = {
+        ...     "apply_spatial_resampling": True,
         ...     "apply_radiance_calculation": True,
         ...     "apply_band_misalignment": True,
         ...     "apply_pan_band": True,
@@ -690,6 +799,15 @@ def create_phisat2_transform(
     if phisat_config is None:
         print("No Phisat-2 configuration provided, returning empty Compose")
         return A.Compose([])
+    
+    # Spatial resampling from S2 (10m) to Φ-sat-2 (4.75m) resolution
+    if phisat_config.get("apply_spatial_resampling", False):
+        transforms.append(
+            ResamplingTransform(
+                s2_resolution=phisat_config.get("s2_resolution", 10.0),
+                phisat2_resolution=phisat_config.get("phisat2_resolution", 4.75),
+            )
+        )
     
     # Radiance calculation from reflectances, uses location/temporal coords
     if phisat_config.get("apply_radiance_calculation", False):
