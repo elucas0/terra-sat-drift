@@ -13,9 +13,9 @@ from terratorch.datamodules.sen1floods11 import Sen1Floods11NonGeoDataModule
 from terratorch.tasks import SemanticSegmentationTask
 from terratorch import BACKBONE_REGISTRY
 
-from phisat2_constants import S2_BANDS_NAMES, S2_BANDS, ProcessingLevels
-from phisat2_albumentations import create_phisat2_transform
-from simulation_config import SimulationConfig, SimulationSteps
+from data_simulation.phisat2_constants import S2_BANDS_NAMES, S2_BANDS
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class TerraMindSen1FloodsTrainer:
         backbone_size: str = "small",
         learning_rate: float = 1e-4,
         batch_size: int = 16,
-        max_epochs: int = 50,
+        max_epochs: int = 10,
         output_dir: str = "./outputs",
         num_workers: int = 4,
         use_amp: bool = True,
@@ -64,7 +64,6 @@ class TerraMindSen1FloodsTrainer:
     def create_datamodule(
         self,
         root_dir: str,
-        phisat_config: Dict[str, Any] | None = None,
     ) -> Sen1Floods11NonGeoDataModule:
         """Create Sen1Floods11 datamodule with optional Phisat-2 augmentation.
         
@@ -75,16 +74,9 @@ class TerraMindSen1FloodsTrainer:
         Returns:
             Configured Sen1Floods11NonGeoDataModule
         """
-        phisat_transform = None
-        if phisat_config:
-            phisat_transform = create_phisat2_transform(phisat_config)
-            
         return Sen1Floods11NonGeoDataModule(
             data_root=root_dir,
             bands=S2_BANDS_NAMES,
-            train_transform=phisat_transform,
-            val_transform=phisat_transform,
-            test_transform=phisat_transform,
             num_workers=self.num_workers,
             batch_size=self.batch_size,
             download=False,
@@ -137,6 +129,7 @@ class TerraMindSen1FloodsTrainer:
         self,
         datamodule: Sen1Floods11NonGeoDataModule,
         model: SemanticSegmentationTask,
+        experiment_name: str,
         stage_1_epochs: int = 15,
         disable_stage_2: bool = True,
     ) -> Tuple[Trainer, SemanticSegmentationTask]:
@@ -163,6 +156,7 @@ class TerraMindSen1FloodsTrainer:
         trainer_stage1 = self._create_trainer(
             stage=1,
             max_epochs=stage_1_epochs,
+            experiment_name=experiment_name
         )
         trainer_stage1.fit(model, datamodule)
         
@@ -199,6 +193,7 @@ class TerraMindSen1FloodsTrainer:
         self,
         stage: int,
         max_epochs: int,
+        experiment_name: str ,
     ) -> Trainer:
         """Create PyTorch Lightning trainer with callbacks.
         
@@ -210,7 +205,7 @@ class TerraMindSen1FloodsTrainer:
             Configured pl.Trainer
         """
         checkpoint_callback = ModelCheckpoint(
-            dirpath=self.output_dir / f"checkpoints_stage{stage}",
+            dirpath=self.output_dir / f"checkpoints_{experiment_name}",
             filename="best-val_mIoU",
             monitor="val/mIoU",
             mode="max",
@@ -227,7 +222,7 @@ class TerraMindSen1FloodsTrainer:
 
         logger_tb = TensorBoardLogger(
             save_dir=self.output_dir,
-            name=f"stage{stage}",
+            name=experiment_name,
             version=0,
         )
 
@@ -243,20 +238,20 @@ class TerraMindSen1FloodsTrainer:
 def main():
     """Main training script."""
     parser = argparse.ArgumentParser(
-        description="Train TerraMind on Sen1Floods11 with optional Phisat-2 augmentation"
+        description="Train TerraMind on Sen1Floods11"
     )
     
     parser.add_argument(
         "--data_root",
         type=str,
-        default="datasets/sen1floods11",
+        default="/shared/home/elucas/datasets/sen1floods11_simulated",
         help="Path to Sen1Floods11 dataset root directory",
     )
     
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./outputs/terramind_sen1floods",
+        default="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated",
         help="Output directory for checkpoints and logs",
     )
     parser.add_argument(
@@ -269,13 +264,13 @@ def main():
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=16,
+        default=8,
         help="Batch size for training",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=50,
+        default=10,
         help="Maximum training epochs",
     )
     parser.add_argument(
@@ -294,54 +289,6 @@ def main():
         "--no_amp",
         action="store_true",
         help="Disable automatic mixed precision",
-    )
-    
-    # Phisat-2 augmentation arguments
-    parser.add_argument(
-        "--apply_spatial_resampling",
-        action="store_true",
-        help="Apply spatial resampling from 10m to 4.75m resolution",
-    )
-    parser.add_argument(
-        "--apply_band_misalignment",
-        action="store_true",
-        help="Apply band misalignment transform",
-    )
-    parser.add_argument(
-        "--apply_pan_band",
-        action="store_true",
-        help="Create panchromatic band",
-    )
-    parser.add_argument(
-        "--apply_psf",
-        action="store_true",
-        help="Apply PSF kernel convolution",
-    )
-    parser.add_argument(
-        "--apply_snr",
-        action="store_true",
-        help="Apply SNR noise",
-    )
-    parser.add_argument(
-        "--processing_level",
-        type=str,
-        default="L1C",
-        choices=["L1A", "L1B", "L1C"],
-        help="Processing level for band misalignment",
-    )
-    
-    # External executable arguments
-    parser.add_argument(
-        "--psf_executable",
-        type=str,
-        default="./executables/phisat2_unix.bin",
-        help="Path to PSF executable binary (optional)",
-    )
-    parser.add_argument(
-        "--snr_executable",
-        type=str,
-        default=None,
-        help="Path to SNR executable binary (optional)",
     )
     
     args = parser.parse_args()
@@ -363,56 +310,9 @@ def main():
         use_amp=not args.no_amp,
     )
     
-    # Build SimulationConfig from command-line arguments
-    simulation_steps = SimulationSteps(
-        spatial_resampling=args.apply_spatial_resampling,
-        radiance=True,  # Radiance is generally included
-        add_panchromatic=args.apply_pan_band,
-        band_misalignment=args.apply_band_misalignment,
-        snr_simulation=args.apply_snr,
-        psf_filtering=args.apply_psf,
-        reflectance_conversion=False,  # Not typically applied in training pipeline
-    )
-    
-    simulation_config = SimulationConfig(
-        steps=simulation_steps,
-        phisat2_exec_path=args.psf_executable if args.apply_psf else None,
-        snr_psf_method="executable" if args.psf_executable else "alternative",
-        processing_level=ProcessingLevels(args.processing_level),
-        misalignment_std_sea=6,
-    )
-    
-    # Convert SimulationConfig to phisat_config dictionary for albumentations transforms
-    phisat_config = {
-        "apply_spatial_resampling": simulation_steps.spatial_resampling,
-        "apply_radiance_calculation": simulation_steps.radiance,
-        "apply_band_misalignment": simulation_steps.band_misalignment,
-        "apply_pan_band": simulation_steps.add_panchromatic,
-        "apply_psf": simulation_steps.psf_filtering,
-        "apply_snr": simulation_steps.snr_simulation,
-        "processing_level": simulation_config.processing_level.value,
-        "std_sea": simulation_config.misalignment_std_sea,
-        "psf_sigma": simulation_config.psf_kernel_sigma,
-        "l_ref": simulation_config.radiance_reference,
-        "snr_values": simulation_config.snr_values,
-    }
-    
-    # Add executables if configured
-    if args.psf_executable and args.apply_psf:
-        phisat_config["psf_executable"] = args.psf_executable
-        logger.info(f"Using PSF executable: {args.psf_executable}")
-    
-    if args.snr_executable and args.apply_snr:
-        phisat_config["snr_executable"] = args.snr_executable
-        logger.info(f"Using SNR executable: {args.snr_executable}")
-    
-    logger.info(f"Simulation config: {simulation_config}")
-    logger.info(f"Phisat-2 transforms config: {phisat_config}")
-    
     # Create datamodule
     datamodule = trainer.create_datamodule(
         root_dir=args.data_root,
-        phisat_config=phisat_config if any(phisat_config.values()) else None,
     )
     datamodule.setup(stage="fit")
     
@@ -423,7 +323,8 @@ def main():
     trainer, trained_model = trainer.train(
         datamodule=datamodule,
         model=model,
-        stage_1_epochs=20,
+        experiment_name=f"terramind_{args.backbone_size}_simulated",
+        stage_1_epochs=10,
         disable_stage_2=False,
     )
     logger.info(f"Training complete!")

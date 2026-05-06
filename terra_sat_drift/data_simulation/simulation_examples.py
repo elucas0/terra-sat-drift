@@ -1,7 +1,7 @@
 """Example usage of simulation workflow."""
 
 from pathlib import Path
-from check_simulation import check_simulation_status
+from terra_sat_drift.data_simulation.utils.check_simulation import check_simulation_status
 from phisat2_constants import ProcessingLevels
 from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
@@ -36,7 +36,7 @@ def example_5_simulation_pipeline():
     executor = simulate_with_executor(
         config=config, 
         source_dir=Path("/shared/projects/phisat2/data/interim/s2b_croped"),
-        output_dir=Path("/shared/projects/phisat2/data/interim/s2b_simulated"),
+        output_dir="/shared/projects/phisat2/data/interim/s2b_simulated",
         metadata_dir=Path("/shared/projects/phisat2/data/interim/s2b_merged"),
         logs_folder="/shared/projects/phisat2/data/index/logs",
         pattern="*_s2b_cropped.tif",

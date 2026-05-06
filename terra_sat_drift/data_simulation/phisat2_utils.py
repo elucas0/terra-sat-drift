@@ -17,8 +17,8 @@ from cv2 import warpAffine
 from eolearn.features.utils import ResizeMethod, spatially_resize_image
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from simulation_config import SimulationConfig
-from phisat2_constants import (
+from .simulation_config import SimulationConfig
+from .phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,

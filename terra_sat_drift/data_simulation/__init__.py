@@ -1,10 +1,14 @@
-"""Data simulation utilities for TerraMind drift detection."""
+from .phisat2_constants import *
+from .phisat2_utils import *
+from .simulation_config import SimulationConfig
 
-from .simulation_config import SimulationConfig, SimulationSteps
-from .simulation_pipeline import SimulationPipeline
+"""Data simulation module for Terra satellite drift analysis.
+
+This module provides utilities for simulating and processing satellite imagery data,
+including batch simulation, albumentations augmentations, and configuration management.
+"""
+
 
 __all__ = [
     "SimulationConfig",
-    "SimulationSteps",
-    "SimulationPipeline",
 ]

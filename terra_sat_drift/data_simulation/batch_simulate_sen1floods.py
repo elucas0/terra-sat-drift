@@ -10,7 +10,7 @@ import json
 
 from phisat2_constants import ProcessingLevels
 
-from sen1floods11_loader import Sen1Floods11S2Loader
+from utils.sen1floods11_loader import Sen1Floods11S2Loader
 from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
 
@@ -105,10 +105,6 @@ def simulate_sen1floods_s2(
 
     steps_obj = SimulationSteps(**simulation_steps)
 
-    # Create output subdirectory for this split
-    split_output_dir = output_dir / f"simulated_{split}"
-    split_output_dir.mkdir(parents=True, exist_ok=True)
-
     # Create simulation config and pipeline
     config = SimulationConfig(
         steps=steps_obj,
@@ -124,9 +120,9 @@ def simulate_sen1floods_s2(
     simulate_with_executor(
         config=config, 
         tiff_files=s2_files,
-        output_dir=f"/shared/home/elucas/tiff_folder/simulated_sen1floods/simulated_{split}",
+        output_dir=f"/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/data/flood_events/HandLabeled/S2Hand",
         metadata_file=metadata_file,
-        logs_folder="/shared/home/elucas/tiff_folder/simulated_sen1floods/logs",
+        logs_folder="/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/logs",
         workers=4,
         save_logs=True,
     )
@@ -151,7 +147,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="/shared/home/elucas/tiff_folder/simulated_sen1floods",
+        default="/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/data/flood_events/HandLabeled/S2Hand",
         help="Output directory for simulated files",
     )
     parser.add_argument(
