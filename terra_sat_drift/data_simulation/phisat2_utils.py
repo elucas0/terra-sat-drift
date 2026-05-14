@@ -738,6 +738,81 @@ class LoadS2FileTask(EOTask):
                 print(f"Warning: Failed to fetch metadata from API: {e}")
 
         return eopatch
+
+class LoadS2DatasetSampleTask(EOTask):
+    """Load S2 data from a dataset sample (without loading from TIFF file).
+    
+    This task creates an EOPatch directly from image data provided through
+    execution kwargs, enabling direct use of dataset samples via __getitem__.
+    """
+
+    def execute(
+        self,
+        *,
+        image: np.ndarray | None,
+        mask: np.ndarray | None,
+        metadata: dict | None,
+        acquisition_date: datetime,
+        temporal_coords: np.ndarray | None = None,
+        location_coords: np.ndarray | None = None,
+        **kwargs
+    ) -> EOPatch:
+        """Create EOPatch from dataset sample.
+        
+        Args:
+            image: Image array from dataset sample (H, W, C or C, H, W)
+            mask: Segmentation mask from dataset sample
+            metadata: Optional metadata dictionary
+            acquisition_date: Acquisition date for the EOPatch timestamp
+            temporal_coords: Optional temporal coordinates (year, day_of_year)
+            location_coords: Optional location coordinates (lat, lon)
+            **kwargs: Additional arguments (ignored)
+            
+        Returns:
+            EOPatch with S2_BANDS feature initialized
+        """
+        if image is None:
+            raise ValueError("Image data is required but not provided")
+        
+        # Convert image to numpy if needed
+        if hasattr(image, 'numpy'):
+            image = image.numpy()
+        
+        # Handle channel ordering: if channels are last dimension, transpose
+        if image.ndim == 3:
+            if image.shape[-1] in (7, 8, 11, 12, 13):  # Likely channels-last
+                pass  # Keep as is
+            elif image.shape[0] in (7, 8, 11, 12, 13):  # Likely channels-first
+                image = np.transpose(image, (1, 2, 0))
+        
+        # Ensure image is float32
+        if image.dtype != np.float32:
+            image = image.astype(np.float32)
+        
+        # Create EOPatch with bbox=None (no geospatial info from dataset)
+        eopatch = EOPatch(bbox=None, timestamps=[acquisition_date])
+        
+        # Add image data as S2_BANDS (add time dimension: (T, H, W, C))
+        if image.ndim == 3:
+            image = image[np.newaxis, :, :, :]  # Add time dimension
+        
+        eopatch[FeatureType.DATA, "S2_BANDS"] = image
+        
+        # Add mask if provided
+        if mask is not None:
+            if hasattr(mask, 'numpy'):
+                mask = mask.numpy()
+            if mask.ndim == 2:
+                mask = mask[np.newaxis, :, :, np.newaxis]  # (T, H, W, C)
+            eopatch[FeatureType.MASK, "SEGMENTATION_MASK"] = mask
+        
+        # Store coordinates as metadata
+        if temporal_coords is not None:
+            eopatch.meta_info['temporal_coords'] = temporal_coords
+        if location_coords is not None:
+            eopatch.meta_info['location_coords'] = location_coords
+        
+        return eopatch
     
 class ResamplingTask(EOTask):
     """Spatially resample bands to Φ-sat-2 pixel size."""

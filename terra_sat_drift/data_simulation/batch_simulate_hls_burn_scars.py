@@ -1,4 +1,4 @@
-"""Batch simulation script for Sen1Floods11 S2 files using the simulation pipeline."""
+"""Batch simulation script for HLS burn scar data using the simulation pipeline."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Optional
-import json
 
 from phisat2_constants import ProcessingLevels
 
 from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
-from terratorch.datasets import Sen1Floods11NonGeo
 
 
 def setup_logging(output_dir: Path, verbose: bool = False) -> None:
@@ -32,7 +30,7 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> None:
     logging.info(f"Logging to {log_file}")
 
 
-def simulate_sen1floods_s2(
+def simulate_hls_burn_scars(
     dataset_root: Path | str,
     output_dir: Path | str,
     split: str = "train",
@@ -41,10 +39,10 @@ def simulate_sen1floods_s2(
     processing_level: ProcessingLevels = ProcessingLevels.L1C,
     verbose: bool = False,
 ):
-    """Simulate Sen1Floods11 S2 files through Φ-sat-2 pipeline using the dataset loader.
+    """Simulate HLS burn scar data through Φ-sat-2 pipeline using the dataset loader.
 
     Args:
-        dataset_root: Path to sen1floods dataset root (e.g., datasets/sen1floods11).
+        dataset_root: Path to HLS burn scars dataset root.
         output_dir: Directory to save simulated files.
         split: Dataset split - train, valid, or test.
         max_files: Maximum number of files to process. If None, processes all.
@@ -62,7 +60,7 @@ def simulate_sen1floods_s2(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 80)
-    logger.info(f"Starting Sen1Floods11 S2 Simulation")
+    logger.info(f"Starting HLS Burn Scars Simulation")
     logger.info(f"Dataset root: {dataset_root}")
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Split: {split}")
@@ -71,15 +69,30 @@ def simulate_sen1floods_s2(
 
     # Load dataset
     try:
-        dataset = Sen1Floods11NonGeo(
-            data_root=str(dataset_root),
-            split=split,
-            use_metadata=True,  # Enable metadata loading for location and temporal info
-        )
+        # Try to load HLS dataset - adjust based on available dataset class
+        # This is a flexible loader that can work with different HLS dataset implementations
+        try:
+            from terratorch.datasets import HLSBurnScarsNonGeo
+            dataset = HLSBurnScarsNonGeo(
+                data_root=str(dataset_root),
+                split=split,
+                use_metadata=True,  # Enable metadata loading for location and temporal info
+            )
+        except ImportError:
+            # Fallback: try generic HLS dataset
+            from torchgeo.datasets import HLS
+            dataset = HLS(
+                root=str(dataset_root),
+                split=split,
+                crs=None,
+                res=None,
+            )
+        
         num_samples = len(dataset)
         logger.info(f"Loaded {num_samples} samples from {split} split")
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
+        logger.error("Make sure HLS burn scars dataset is available at the specified root")
         raise
 
     # Limit to max_files if specified
@@ -134,18 +147,18 @@ def simulate_sen1floods_s2(
 def main():
     """Command-line interface for batch simulation."""
     parser = argparse.ArgumentParser(
-        description="Batch simulate Sen1Floods11 S2 files through Φ-sat-2 pipeline"
+        description="Batch simulate HLS burn scar data through Φ-sat-2 pipeline"
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default="/shared/home/elucas/datasets/sen1floods11",
-        help="Path to sen1floods dataset (default: datasets/sen1floods11)",
+        default="/shared/home/elucas/datasets/hls_burn_scars",
+        help="Path to HLS burn scars dataset (default: /shared/home/elucas/datasets/hls_burn_scars)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/data/flood_events/HandLabeled/S2Hand",
+        default="/shared/home/elucas/datasets/hls_burn_scars_simulated",
         help="Output directory for simulated files",
     )
     parser.add_argument(
@@ -215,7 +228,7 @@ def main():
     }
 
     # Run simulation
-    simulate_sen1floods_s2(
+    simulate_hls_burn_scars(
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
         split=args.split,
