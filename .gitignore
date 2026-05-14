@@ -211,3 +211,4 @@ experiments
 datasets
 *.bin
 outputs
+lightning_logs
