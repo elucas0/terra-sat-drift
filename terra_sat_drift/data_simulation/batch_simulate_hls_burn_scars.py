@@ -12,6 +12,7 @@ from phisat2_constants import ProcessingLevels
 from simulation_pipeline import simulate_with_executor
 from simulation_config import SimulationConfig, SimulationSteps
 
+from terratorch.datasets import FireScarsNonGeo
 
 def setup_logging(output_dir: Path, verbose: bool = False) -> None:
     """Setup logging configuration."""
@@ -69,25 +70,12 @@ def simulate_hls_burn_scars(
 
     # Load dataset
     try:
-        # Try to load HLS dataset - adjust based on available dataset class
-        # This is a flexible loader that can work with different HLS dataset implementations
-        try:
-            from terratorch.datasets import HLSBurnScarsNonGeo
-            dataset = HLSBurnScarsNonGeo(
-                data_root=str(dataset_root),
-                split=split,
-                use_metadata=True,  # Enable metadata loading for location and temporal info
-            )
-        except ImportError:
-            # Fallback: try generic HLS dataset
-            from torchgeo.datasets import HLS
-            dataset = HLS(
-                root=str(dataset_root),
-                split=split,
-                crs=None,
-                res=None,
-            )
-        
+        dataset = FireScarsNonGeo(
+            data_root=str(dataset_root),
+            split=split,
+            use_metadata=True,  # Enable metadata loading for location and temporal info
+        )
+
         num_samples = len(dataset)
         logger.info(f"Loaded {num_samples} samples from {split} split")
     except Exception as e:
@@ -130,7 +118,7 @@ def simulate_hls_burn_scars(
         config=config, 
         dataset=dataset,
         num_samples=num_samples_to_process,
-        output_dir=str(output_dir),
+        output_dir=str(Path(output_dir) / split),
         logs_folder=str(Path(output_dir) / "logs"),
         workers=4,
         save_logs=True,

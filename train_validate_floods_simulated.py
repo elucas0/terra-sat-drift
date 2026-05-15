@@ -13,10 +13,12 @@ warnings.filterwarnings('ignore')
 from terratorch.tasks import SemanticSegmentationTask
 from terratorch import BACKBONE_REGISTRY
 from terratorch.datamodules import GenericNonGeoSegmentationDataModule
+from terratorch.datamodules.sen1floods11 import Sen1Floods11NonGeoDataModule
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
 import cv2
 import albumentations as A
@@ -24,6 +26,71 @@ import albumentations as A
 
 from terra_sat_drift.data_simulation.phisat2_constants import S2_BANDS_NAMES, S2_BANDS, S2_PAN_BANDS
 
+class MMDLoss(torch.nn.Module):
+    def __init__(self, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+        super(MMDLoss, self).__init__()
+        self.kernel_num = kernel_num
+        self.kernel_mul = kernel_mul
+        self.fix_sigma = fix_sigma
+
+    def gaussian_kernel(self, source, target, kernel_mul, kernel_num, fix_sigma):
+        n_samples = int(source.size(0)) + int(target.size(0))
+        total = torch.cat([source, target], dim=0)
+        total0 = total.unsqueeze(0).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+        total1 = total.unsqueeze(1).expand(int(total.size(0)), int(total.size(0)), int(total.size(1)))
+        L2_distance = ((total0 - total1)**2).sum(2)
+        if fix_sigma:
+            bandwidth = fix_sigma
+        else:
+            bandwidth = torch.sum(L2_distance.data) / (n_samples**2 - n_samples)
+        bandwidth /= kernel_mul ** (kernel_num // 2)
+        bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
+        kernel_val = [torch.exp(-L2_distance / bw) for bw in bandwidth_list]
+        return sum(kernel_val)
+
+    def forward(self, source, target):
+        batch_size = int(source.size(0))
+        kernels = self.gaussian_kernel(source, target, self.kernel_mul, self.kernel_num, self.fix_sigma)
+        XX = kernels[:batch_size, :batch_size]
+        YY = kernels[batch_size:, batch_size:]
+        XY = kernels[:batch_size, batch_size:]
+        return torch.mean(XX + YY - 2 * XY)
+
+class DomainAdaptationTask(SemanticSegmentationTask):
+    def __init__(self, mmd_weight=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.mmd_loss_fn = MMDLoss()
+        self.mmd_weight = mmd_weight
+
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
+        source_batch = batch["source"]
+        target_batch = batch["target"]
+
+        # 1. Sélection des données
+        # Source (S2 Clean) : Déjà 7 bandes
+        x_source = source_batch["image"] 
+        
+        # Target (Simulated) : On retire la PAN (index 0)
+        # Les bandes 1 à 7 correspondent aux multispectrales de S2
+        x_target = target_batch["image"][:, 1:, :, :] 
+        y_target = target_batch["mask"]
+
+        # 2. Extraction des caractéristiques via le backbone
+        # On récupère le token [CLS] (index 0) de la dernière couche
+        feat_source = self.model.model.backbone(x_source)[-1][:, 0, :]
+        feat_target = self.model.model.backbone(x_target)[-1][:, 0, :]
+
+        # 3. Calcul des pertes
+        y_hat_target = self.forward(x_target)
+        seg_loss = self.loss(y_hat_target, y_target)
+        
+        # Alignement des domaines sur les 7 bandes multispectrales
+        mmd_dist = self.mmd_loss_fn(feat_source, feat_target)
+
+        total_loss = seg_loss + self.mmd_weight * mmd_dist
+
+        self.log("train/mmd_dist", mmd_dist)
+        return total_loss
 
 if __name__ == "__main__":
     # Set device
@@ -53,9 +120,17 @@ if __name__ == "__main__":
         A.Lambda(mask=preprocess_mask),
         A.pytorch.ToTensorV2(),
     ]
+    
+    dm_source = Sen1Floods11NonGeoDataModule(
+        data_root="/shared/home/elucas/datasets/sen1floods11",
+        bands=S2_BANDS_NAMES, # 7 bandes
+        train_transform=transform,
+        val_transform=transform,
+        test_transform=transform,
+        batch_size=8, num_workers=4
+    )
 
-
-    datamodule = GenericNonGeoSegmentationDataModule(
+    dm_target = GenericNonGeoSegmentationDataModule(
         batch_size=8,
         data_root=root_dir,
         
@@ -126,19 +201,20 @@ if __name__ == "__main__":
         "num_classes": 2,
     }
 
-    # task = SemanticSegmentationTask(
-    #     model_factory="EncoderDecoderFactory",
-    #     model_args=model_args,
-    #     lr=2e-5,
-    #     ignore_index=-1,
-    #     plot_on_val=False,
-    #     loss="ce",
-    #     optimizer="AdamW",
-    #     optimizer_hparams={"weight_decay": 0.05},
-    #     class_names=["background", "flood"],
-    #     freeze_backbone=True,
-    # )
-    task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated/terramind_v1_tiny_simulated/checkpoints/best-val_mIoU-v6.ckpt")
+    task = DomainAdaptationTask(
+        model_factory="EncoderDecoderFactory",
+        model_args=model_args,
+        mmd_weight=0.2,
+        lr=2e-5,
+        ignore_index=-1,
+        plot_on_val=False,
+        loss="ce",
+        optimizer="AdamW",
+        optimizer_hparams={"weight_decay": 0.05},
+        class_names=["background", "flood"],
+        freeze_backbone=False,
+    )
+    # task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated/terramind_v1_tiny_simulated/checkpoints/best-val_mIoU-v6.ckpt")
 
     
     experiment_name = f"terramind_v1_{backbone_size}_simulated"
@@ -174,6 +250,13 @@ if __name__ == "__main__":
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    datamodule.setup(stage="fit")
-    # trainer.fit(model=task, datamodule=datamodule)
-    trainer.test(model=task, dataloaders=datamodule)
+    dm_source.setup("fit")
+    dm_target.setup("fit")
+    
+    combined_loader = CombinedLoader(
+        {"source": dm_source.train_dataloader(), "target": dm_target.train_dataloader()},
+        mode="min_size" # S'arrête quand le plus petit dataset est épuisé
+    )
+    
+    trainer.fit(model=task, train_dataloaders=combined_loader, val_dataloaders=dm_target.val_dataloader())
+    # trainer.test(model=task, dataloaders=datamodule)

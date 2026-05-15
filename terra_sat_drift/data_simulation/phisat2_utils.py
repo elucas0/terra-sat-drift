@@ -881,7 +881,7 @@ class FetchMetadataTask(EOTask):
     def execute(self, eopatch: EOPatch, **kwargs) -> EOPatch:
         if not all([eopatch, eopatch.bbox, eopatch.timestamps]):
             raise ValueError(
-                "AddMetadataTask needs eopatch to have bbox and temporal data!"
+                "FetchMetadataTask needs eopatch to have bbox and temporal data!"
             )
 
         # Query Copernicus catalogue for Sentinel-2 L2A products
