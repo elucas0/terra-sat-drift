@@ -104,6 +104,7 @@ def simulate_hls_burn_scars(
 
     # Create simulation config and pipeline
     config = SimulationConfig(
+        bands_names=["B02", "B03", "B04", "B8A", "B11", "B12"],  # HLS burn scars bands
         steps=steps_obj,
         processing_level=processing_level,
         phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
@@ -220,7 +221,7 @@ def main():
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
         split=args.split,
-        max_files=args.max_files,
+        max_files=1,
         simulation_steps=simulation_steps,
         processing_level=ProcessingLevels[args.processing_level],
         verbose=args.verbose,

@@ -127,7 +127,6 @@ def simulate_with_executor(
             
             # Extract image data from sample
             image = sample.get("image")
-            mask = sample.get("mask")
             
             # Extract metadata if available
             temporal_coords = sample.get("temporal_coords")
@@ -147,10 +146,8 @@ def simulate_with_executor(
                     acquisition_date = datetime.strptime(f"{year}:{day_of_year}", "%Y:%j")
                 except (ValueError, IndexError, AttributeError):
                     raise ValueError(f"Invalid temporal coordinates format for sample {sample_idx}")
-                    acquisition_date = datetime.now()
             else:
                 raise ValueError(f"No temporal coordinates found for sample {sample_idx}, cannot determine acquisition date")
-                acquisition_date = datetime.now()
             
             # Create output filename
             output_filename = f"simulated_{config.processing_level.name}_sample_{sample_idx:05d}.tif"
@@ -158,11 +155,9 @@ def simulate_with_executor(
             
             exec_args.append({
                 "image": image,
-                "mask": mask,
                 "output_tiff_path": str(output_path),
                 "metadata": None,
                 "acquisition_date": acquisition_date,
-                "temporal_coords": temporal_coords,
                 "location_coords": location_coords,
             })
             
@@ -181,7 +176,7 @@ def simulate_with_executor(
     logger.info(f"\nPrepared {len(exec_args)} execution arguments")
 
     # Build individual task nodes to be connected with linearly_connect_tasks
-    task_list = []
+    task_list = list[EOTask]()
 
     # Task 1: Load S2 data from dataset sample (using __getitem__)
     task_list.append(LoadS2DatasetSampleTask())
@@ -334,13 +329,13 @@ def simulate_with_executor(
     # Connect all tasks with linearly_connect_tasks
     nodes = linearly_connect_tasks(*task_list)
     workflow = EOWorkflow(nodes)
-
+    
     # Prepare execution kwargs
     execution_kwargs = [
         {
             nodes[0]: {
                 "image": args["image"],
-                "mask": args["mask"],
+                "bands_names": config.bands_names,
                 "temporal_coords": args["temporal_coords"],
                 "location_coords": args["location_coords"],
                 "metadata": args["metadata"],

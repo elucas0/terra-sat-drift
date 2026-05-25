@@ -29,7 +29,7 @@ from .phisat2_constants import (
     S2_RESOLUTION,
     S2_BANDS,
     S2_PAN_BANDS,
-    WORLD_GDF,
+    # WORLD_GDF,
     ProcessingLevels,
 )
 from sentinelhub import (
@@ -424,11 +424,12 @@ class CalculateRadianceTask(EOTask):
         self.input_feature = self.parse_feature(input_feature)
         self.output_feature = self.parse_feature(output_feature)
 
-    def execute(self, eopatch):
+    # TODO find a way to pass the band_names without hardcoding them in the task, e.g. as a parameter of the task or as metadata of the eopatch
+    def execute(self, eopatch, bands_names: List[str]):
         assert all(
             [
                 isinstance(eopatch.scalar[f"sol_irr_{band}"], np.ndarray)
-                for band in S2_BANDS
+                for band in bands_names
             ]
         )
         assert isinstance(eopatch.scalar["earth_sun_dist"], np.ndarray)
@@ -439,7 +440,7 @@ class CalculateRadianceTask(EOTask):
             / np.pi
         )
         solar_irradiances = np.concatenate(
-            [eopatch.scalar[f"sol_irr_{band}"][:, :, np.newaxis] for band in S2_BANDS],
+            [eopatch.scalar[f"sol_irr_{band}"][:, :, np.newaxis] for band in bands_names],
             axis=-1,
         )
 
@@ -733,85 +734,101 @@ class LoadS2FileTask(EOTask):
         else:
             try:
                 add_meta_task = FetchMetadataTask()
-                eopatch = add_meta_task.execute(eopatch)
+                eopatch = add_meta_task.execute(eopatch, bands_names=S2_BANDS)
             except Exception as e:
                 print(f"Warning: Failed to fetch metadata from API: {e}")
 
         return eopatch
 
 class LoadS2DatasetSampleTask(EOTask):
-    """Load S2 data from a dataset sample (without loading from TIFF file).
+    """Load S2 data from a dataset sample and fetch metadata using FetchMetadataTask.
     
     This task creates an EOPatch directly from image data provided through
-    execution kwargs, enabling direct use of dataset samples via __getitem__.
+    execution kwargs, uses lat/lon coordinates to fetch S2 acquisition metadata
+    via the Copernicus API, and enables direct use of dataset samples via __getitem__.
     """
+
+    def __init__(self, config: Optional[SHConfig] = None):
+        """Initialize with optional SentinelHub config.
+        
+        Args:
+            config: Optional SHConfig for metadata fetching.
+        """
+        self.config = config
+        self.fetch_metadata_task = FetchMetadataTask(config=config)
 
     def execute(
         self,
         *,
-        image: np.ndarray | None,
-        mask: np.ndarray | None,
+        image: np.ndarray,
+        bands_names: List[str],
         metadata: dict | None,
         acquisition_date: datetime,
-        temporal_coords: np.ndarray | None = None,
         location_coords: np.ndarray | None = None,
         **kwargs
     ) -> EOPatch:
-        """Create EOPatch from dataset sample.
+        """Create EOPatch from dataset sample and fetch S2 metadata via lat/lon point.
         
         Args:
             image: Image array from dataset sample (H, W, C or C, H, W)
-            mask: Segmentation mask from dataset sample
+            bands_names: List of band names
             metadata: Optional metadata dictionary
             acquisition_date: Acquisition date for the EOPatch timestamp
             temporal_coords: Optional temporal coordinates (year, day_of_year)
-            location_coords: Optional location coordinates (lat, lon)
+            location_coords: Optional location coordinates as torch.Tensor [lat, lon]
             **kwargs: Additional arguments (ignored)
             
         Returns:
-            EOPatch with S2_BANDS feature initialized
+            EOPatch with S2_BANDS feature and fetched metadata
         """
-        if image is None:
-            raise ValueError("Image data is required but not provided")
+        # Convert torch.Tensor to numpy array if needed
+        if hasattr(image, 'cpu'):  # Check if it's a torch.Tensor
+            image = image.cpu().detach().numpy()
+        elif not isinstance(image, np.ndarray):
+            image = np.asarray(image)
         
-        # Convert image to numpy if needed
-        if hasattr(image, 'numpy'):
-            image = image.numpy()
-        
-        # Handle channel ordering: if channels are last dimension, transpose
+        # Handle channel ordering: if channels are first dimension, transpose
         if image.ndim == 3:
-            if image.shape[-1] in (7, 8, 11, 12, 13):  # Likely channels-last
-                pass  # Keep as is
-            elif image.shape[0] in (7, 8, 11, 12, 13):  # Likely channels-first
+            if image.shape[0] in (6, 7, 8, 11, 12, 13):  # Likely channels-first
                 image = np.transpose(image, (1, 2, 0))
-        
-        # Ensure image is float32
-        if image.dtype != np.float32:
-            image = image.astype(np.float32)
-        
-        # Create EOPatch with bbox=None (no geospatial info from dataset)
-        eopatch = EOPatch(bbox=None, timestamps=[acquisition_date])
-        
-        # Add image data as S2_BANDS (add time dimension: (T, H, W, C))
-        if image.ndim == 3:
+            # Add image data as S2_BANDS (add time dimension: (T, H, W, C))
             image = image[np.newaxis, :, :, :]  # Add time dimension
         
+        # Create EOPatch with bbox from lat/lon point
+        eopatch = EOPatch(bbox=None, timestamps=[acquisition_date])
+                
         eopatch[FeatureType.DATA, "S2_BANDS"] = image
         
-        # Add mask if provided
-        if mask is not None:
-            if hasattr(mask, 'numpy'):
-                mask = mask.numpy()
-            if mask.ndim == 2:
-                mask = mask[np.newaxis, :, :, np.newaxis]  # (T, H, W, C)
-            eopatch[FeatureType.MASK, "SEGMENTATION_MASK"] = mask
-        
-        # Store coordinates as metadata
-        if temporal_coords is not None:
-            eopatch.meta_info['temporal_coords'] = temporal_coords
+        # Fetch metadata using lat/lon if location_coords are provided
         if location_coords is not None:
-            eopatch.meta_info['location_coords'] = location_coords
-        
+            try:
+                # Convert location_coords to lat/lon values
+                if hasattr(location_coords, 'item'):
+                    # torch.Tensor case
+                    lat = float(location_coords[0].item())
+                    lon = float(location_coords[1].item())
+                else:
+                    # numpy array case
+                    lat = float(location_coords[0])
+                    lon = float(location_coords[1])
+                
+                # Create a small BBox around the point (0.01 degrees ~1km)
+                buffer = 0.01
+                bbox = BBox(
+                    [lon - buffer, lat - buffer, lon + buffer, lat + buffer],
+                    crs=CRS.WGS84
+                )
+                
+                # Update eopatch with bbox for metadata fetching
+                eopatch.bbox = bbox
+                
+                # Fetch metadata from Copernicus API using FetchMetadataTask
+                eopatch = self.fetch_metadata_task.execute(eopatch, bands_names=bands_names)
+                
+            except Exception as e:
+                # Log warning but continue without metadata
+                print(f"Warning: Failed to fetch S2 metadata for location {location_coords}: {e}")
+    
         return eopatch
     
 class ResamplingTask(EOTask):
@@ -878,7 +895,7 @@ class FetchMetadataTask(EOTask):
         """
         self.config = config
 
-    def execute(self, eopatch: EOPatch, **kwargs) -> EOPatch:
+    def execute(self, eopatch: EOPatch, bands_names: List[str], **kwargs) -> EOPatch:
         if not all([eopatch, eopatch.bbox, eopatch.timestamps]):
             raise ValueError(
                 "FetchMetadataTask needs eopatch to have bbox and temporal data!"
@@ -917,7 +934,7 @@ class FetchMetadataTask(EOTask):
         # Initialize scalar fields
         dim = len(eopatch.timestamps)
         eopatch.scalar["earth_sun_dist"] = np.ones((dim, 1))
-        for s2_band in S2_BANDS:
+        for s2_band in bands_names:
             eopatch.scalar[f"sol_irr_{s2_band}"] = np.ones((dim, 1))
 
         # Extract metadata from each product
@@ -925,12 +942,12 @@ class FetchMetadataTask(EOTask):
             metadata = self._fetch_metadata_from_copernicus(tile)
 
             # Extract Earth-Sun distance and solar irradiance from metadata
-            earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp)
+            earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp, bands_names)
             
             eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
 
             # Populate solar irradiance for each band
-            for s2_band in S2_BANDS:
+            for s2_band in bands_names:
                 if s2_band in solar_irradiances:
                     eopatch.scalar[f"sol_irr_{s2_band}"][tile_idx] = solar_irradiances[s2_band]
 
@@ -973,7 +990,7 @@ class FetchMetadataTask(EOTask):
             raise FileNotFoundError(
                 f"SAFE product not found at {local_safe_path} for product {product_id}"
             )
-        
+        print(f"Metadata file found for product {product_id} at {local_safe_path}")
         # Construct the metadata file path
         metadata_file = os.path.join(local_safe_path, "MTD_MSIL2A.xml")
         if not os.path.exists(metadata_file):
@@ -999,11 +1016,12 @@ class FetchMetadataTask(EOTask):
         return metadata_info
 
     @staticmethod
-    def _extract_irradiance_data(metadata: Dict, timestamp: datetime) -> Tuple[float, Dict[str, float]]:
+    def _extract_irradiance_data(metadata: Dict, timestamp: datetime, bands_names: List[str]) -> Tuple[float, Dict[str, float]]:
         """Extract Earth-Sun distance and solar irradiance from Sentinel-2 metadata XML.
         
         :param metadata: Metadata dictionary containing XML root and product info
         :param timestamp: Timestamp of the product
+        :param bands_names: List of band names
         :return: Tuple of (earth_sun_distance, solar_irradiances_dict)
         """
         xml_root = metadata.get("xml_root")
@@ -1017,7 +1035,8 @@ class FetchMetadataTask(EOTask):
         
         # Extract solar irradiance from Solar_Irradiance_List
         band_id_to_band = {
-            0: "B01", 1: "B02", 2: "B03", 3: "B04", 4: "B05", 5: "B06", 6: "B07", 7: "B08"
+            0: "B01", 1: "B02", 2: "B03", 3: "B04", 4: "B05", 5: "B06", 6: "B07", 7: "B08",
+            8: "B8A", 9: "B09", 10: "B10", 11: "B11", 12: "B12"
         }
         
         irradiance_list = xml_root.find(".//Solar_Irradiance_List")
@@ -1027,8 +1046,8 @@ class FetchMetadataTask(EOTask):
                 if band_id is not None:
                     try:
                         band_id_int = int(band_id)
-                        irradiance_value = float(irradiance_elem.text)
-                        if band_id_int in band_id_to_band:
+                        if band_id_int in band_id_to_band and band_id_to_band[band_id_int] in bands_names:
+                            irradiance_value = float(irradiance_elem.text)
                             solar_irradiances[band_id_to_band[band_id_int]] = irradiance_value
                     except (ValueError, TypeError):
                         pass

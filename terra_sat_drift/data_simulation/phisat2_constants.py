@@ -35,4 +35,4 @@ class ProcessingLevels(Enum):
     L1C = "L1C"
 
 
-WORLD_GDF = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+# WORLD_GDF = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
