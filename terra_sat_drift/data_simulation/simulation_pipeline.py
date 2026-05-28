@@ -189,7 +189,6 @@ def simulate_with_executor(
                 (FeatureType.DATA, "S2_RADIANCE"),
             )
         )
-        task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_BANDS")]))
 
     # Task 3: Add panchromatic band (if enabled)
     if config.steps.add_panchromatic:
@@ -200,10 +199,6 @@ def simulate_with_executor(
                 (FeatureType.DATA, "BANDS-RAD-PAN"),
             )
         )
-        if config.steps.radiance:
-            task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_RADIANCE")]))
-        else:
-            task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_BANDS")]))
 
     # Task 4: Spatial resampling (if any processing step requires it)
     if config.steps.add_panchromatic or config.steps.band_misalignment:

@@ -434,11 +434,16 @@ class CalculateRadianceTask(EOTask):
         )
         assert isinstance(eopatch.scalar["earth_sun_dist"], np.ndarray)
 
+        assert isinstance (eopatch.data["sunZenithAngles"], np.ndarray)
+            
         factor = (
             np.cos(np.radians(eopatch.data["sunZenithAngles"]))
             * eopatch.scalar["earth_sun_dist"][:, np.newaxis, np.newaxis, :]
             / np.pi
         )
+        
+        print(factor)
+
         solar_irradiances = np.concatenate(
             [eopatch.scalar[f"sol_irr_{band}"][:, :, np.newaxis] for band in bands_names],
             axis=-1,
@@ -465,7 +470,7 @@ class CalculateReflectanceTask(EOTask):
 
         :param input_feature: Input feature holding radiance values. Expected 8 bands.
         :param output_feature: Output feature with radiances (for L1A and L1B) or reflectance (for L1C) values.
-        :param processing_level: Processing level desired. If L1A or L1B no conversion to reflectances is applied.
+        :param processing_level: Processin g level desired. If L1A or L1B no conversion to reflectances is applied.
         """
         self.input_feature = self.parse_feature(input_feature)
         self.output_feature = self.parse_feature(output_feature)
@@ -888,11 +893,17 @@ def _create_bbox_from_rasterio(src) -> BBox:
     return bbox
 
 class FetchMetadataTask(EOTask):
-    def __init__(self, config: Optional[SHConfig] = None):
+    def __init__(
+        self,
+        input_feature: Tuple[FeatureType, str] = (FeatureType.DATA, "S2_BANDS"),
+        config: Optional[SHConfig] = None,
+    ):
         """Download Sentinel-2 metadata necessary to compute radiances
 
+        :param input_feature: Input feature to get the shape from.
         :param config: Optional Sentinel Hub configuration file.
         """
+        self.input_feature = self.parse_feature(input_feature)
         self.config = config
 
     def execute(self, eopatch: EOPatch, bands_names: List[str], **kwargs) -> EOPatch:
@@ -930,43 +941,86 @@ class FetchMetadataTask(EOTask):
             json_next = requests.get(next_link).json()
             products_list.extend(json_next.get('value', []))
             next_link = json_next.get('@odata.nextLink', None)
-
+            
         # Initialize scalar fields
         dim = len(eopatch.timestamps)
         eopatch.scalar["earth_sun_dist"] = np.ones((dim, 1))
-        for s2_band in bands_names:
-            eopatch.scalar[f"sol_irr_{s2_band}"] = np.ones((dim, 1))
-
-        # Extract metadata from each product
-        for tile_idx, (tile, timestamp) in enumerate(zip(products_list, eopatch.timestamps)):
-            metadata = self._fetch_metadata_from_copernicus(tile)
-
-            # Extract Earth-Sun distance and solar irradiance from metadata
-            earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp, bands_names)
             
-            eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
-
-            # Populate solar irradiance for each band
-            for s2_band in bands_names:
+        for s2_band in S2_BANDS:
+            eopatch.scalar[f"sol_irr_{s2_band}"] = np.ones((dim, 1))
+        
+        # Handle the case when no products are found in the Copernicus catalogue for the given area and time range
+        if len(products_list) == 0:
+            solar_irradiances = {
+                "B01": 1895.0,   # Coastal aerosol
+                "B02": 1941.0,   # Blue
+                "B03": 1822.0,   # Green
+                "B04": 1610.0,   # Red
+                "B05": 1519.0,   # Vegetation Red Edge
+                "B06": 1447.0,   # Vegetation Red Edge
+                "B07": 1387.0,   # Vegetation Red Edge
+                "B08": 1034.0,   # NIR
+                "B8A": 955.0,   # Vegetation Red Edge
+                "B11": 245.0,   # SWIR
+                "B12": 85.0,    # SWIR
+            }
+            for s2_band in S2_BANDS:
                 if s2_band in solar_irradiances:
-                    eopatch.scalar[f"sol_irr_{s2_band}"][tile_idx] = solar_irradiances[s2_band]
+                    eopatch.scalar[f"sol_irr_{s2_band}"] = np.full(
+                        (dim, 1), solar_irradiances[s2_band]
+                    )
 
-        # Extract and add sun zenith angles from metadata
-        for tile_idx, tile in enumerate(products_list):
-            safe_path = tile.get("S3Path", "").rstrip("/")
-            sun_zenith_angles = self._parse_sun_zenith_angles(safe_path)
-            # Add sun zenith angles to the data feature on first occurrence
-            # Get target shape from existing band data
-            for feature in eopatch.data.keys():
-                if eopatch[FeatureType.DATA, feature].ndim == 4:
-                    target_h, target_w = eopatch[FeatureType.DATA, feature].shape[1:3]
-                    # Resize to match band resolution
-                    sun_zenith_angles = cv2.resize(sun_zenith_angles, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-                    break
-                        
-                # Add to eopatch with proper 4D shape (time, height, width, channels)
-            eopatch[FeatureType.DATA, "sunZenithAngles"] = sun_zenith_angles[np.newaxis, :, :, np.newaxis]
-            break
+            eopatch.scalar["earth_sun_dist"] = np.full(
+                (dim, 1), sun.earth_distance(eopatch.timestamps[0]).to(u.au).value
+            )
+            # Assume sun Zenith angle of 30 degrees for all pixels and timestamps
+            sun_zenith_angles = np.full(
+                (
+                    eopatch[self.input_feature].shape[1],
+                    eopatch[self.input_feature].shape[2],
+                ),
+                30.0,
+                dtype=np.float32,
+            )
+            eopatch[FeatureType.DATA, "sunZenithAngles"] = sun_zenith_angles[
+                np.newaxis, :, :, np.newaxis
+            ]
+            raise ValueError(
+                "No products found in Copernicus catalogue for the given area and time range, using default metadata values."
+            )
+        else:
+            print(f"Found {len(products_list)} products in Copernicus catalogue for the given area and time range.")
+            # Extract metadata from each product
+            for tile_idx, (tile, timestamp) in enumerate(zip(products_list, eopatch.timestamps)):
+                metadata = self._fetch_metadata_from_copernicus(tile)
+
+                # Extract Earth-Sun distance and solar irradiance from metadata
+                earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp)
+                
+                eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
+                print(f"Earth-Sun distance for tile {tile_idx}: {earth_sun_dist} AU")
+
+                # Populate solar irradiance for each band
+                for s2_band in S2_BANDS:
+                    if s2_band in solar_irradiances:
+                        eopatch.scalar[f"sol_irr_{s2_band}"][tile_idx] = solar_irradiances[s2_band]
+
+            # Extract and add sun zenith angles from metadata
+            for tile_idx, tile in enumerate(products_list):
+                safe_path = tile.get("S3Path", "").rstrip("/")
+                sun_zenith_angles = self._parse_sun_zenith_angles(safe_path)
+                # Add sun zenith angles to the data feature on first occurrence
+                # Get target shape from existing band data
+                for feature in eopatch.data.keys():
+                    if eopatch[FeatureType.DATA, feature].ndim == 4:
+                        target_h, target_w = eopatch[FeatureType.DATA, feature].shape[1:3]
+                        # Resize to match band resolution
+                        sun_zenith_angles = cv2.resize(sun_zenith_angles, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                        break
+                            
+                    # Add to eopatch with proper 4D shape (time, height, width, channels)
+                eopatch[FeatureType.DATA, "sunZenithAngles"] = sun_zenith_angles[np.newaxis, :, :, np.newaxis]
+                break
 
         return eopatch
 
@@ -1056,14 +1110,14 @@ class FetchMetadataTask(EOTask):
         if not solar_irradiances:
             print('Could not extract solar irradiance from metadata, using standard reference values for all bands.')
             solar_irradiances = {
-                "B1": 1895.0,   # Coastal aerosol
-                "B2": 1941.0,   # Blue
-                "B3": 1822.0,   # Green
-                "B4": 1610.0,   # Red
-                "B5": 1519.0,   # Vegetation Red Edge
-                "B6": 1447.0,   # Vegetation Red Edge
-                "B7": 1387.0,   # Vegetation Red Edge
-                "B8": 1034.0,   # NIR
+                "B01": 1895.0,   # Coastal aerosol
+                "B02": 1941.0,   # Blue
+                "B03": 1822.0,   # Green
+                "B04": 1610.0,   # Red
+                "B05": 1519.0,   # Vegetation Red Edge
+                "B06": 1447.0,   # Vegetation Red Edge
+                "B07": 1387.0,   # Vegetation Red Edge
+                "B08": 1034.0,   # NIR
                 "B8A": 955.0,   # Vegetation Red Edge
                 "B11": 245.0,   # SWIR
                 "B12": 85.0,    # SWIR

@@ -105,7 +105,7 @@ def simulate_sen1floods_s2(
     config = SimulationConfig(
         steps=steps_obj,
         processing_level=processing_level,
-        phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
+        phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
         snr_psf_method="executable",  # "alternative" or "executable"
     )
 
