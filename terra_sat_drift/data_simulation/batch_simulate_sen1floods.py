@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 import json
+import numpy as np
+
 
 from phisat2_constants import ProcessingLevels
 
@@ -104,13 +106,19 @@ def simulate_sen1floods_s2(
         }
 
     steps_obj = SimulationSteps(**simulation_steps)
+    snr_values = [20, 250]
 
     # Create simulation config and pipeline
     config = SimulationConfig(
         steps=steps_obj,
         processing_level=processing_level,
-        phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
-        snr_psf_method="executable",  # "alternative" or "executable"
+        # phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
+        snr_psf_method="alternative",  # "alternative" or "executable"
+        misalignment_std_sea=6,
+        misalignment_std_land=6,
+        snr_values=snr_values,
+        psf_kernel_sigma=1.5,
+        radiance_reference=100.0,
     )
 
     logger.info(f"Simulation steps: {steps_obj.as_dict()}")
@@ -120,17 +128,19 @@ def simulate_sen1floods_s2(
     simulate_with_executor(
         config=config, 
         tiff_files=s2_files,
-        output_dir=f"/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/data/flood_events/HandLabeled/S2Hand",
+        output_dir=output_dir,
         metadata_file=metadata_file,
-        logs_folder="/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/logs",
+        logs_folder=output_dir / "v1.1/logs",
         workers=4,
         save_logs=True,
     )
+    
+    config.save_json(output_dir / "v1.1/simulation_config.json")
 
     # Log summary
     logger.info("=" * 80)
     logger.info("Simulation Complete")
-    logger.info(f"Logs saved to: {output_dir / 'logs'}")
+    logger.info(f"Logs saved to: {output_dir / 'v1.1/logs'}")
     logger.info("=" * 80)
 
 def main():
@@ -147,7 +157,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="/shared/home/elucas/datasets/sen1floods11_simulated/v1.1/data/flood_events/HandLabeled/S2Hand",
+        default="/shared/home/elucas/datasets/sen1floods11_simulated_alt_v1",
         help="Output directory for simulated files",
     )
     parser.add_argument(
@@ -226,8 +236,9 @@ def main():
     simulate_sen1floods_s2(
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
-        split="test",
+        split=args.split,
         dataset_type=args.dataset_type,
+        max_files=args.max_files,
         simulation_steps=simulation_steps,
         processing_level=ProcessingLevels.L1C,
         verbose=False,

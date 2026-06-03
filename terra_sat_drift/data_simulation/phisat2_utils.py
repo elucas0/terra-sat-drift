@@ -17,8 +17,8 @@ from cv2 import warpAffine
 from eolearn.features.utils import ResizeMethod, spatially_resize_image
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from .simulation_config import SimulationConfig
-from .phisat2_constants import (
+from simulation_config import SimulationConfig
+from phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,
@@ -55,7 +55,7 @@ class AlternativePhisatCalculationTask(EOTask):
         self,
         input_feature: Tuple[FeatureType, str],
         snr_feature: Tuple[FeatureType, str],
-        snr_values: Dict[str, int],
+        snr_values: List[int],
         l_ref: float,
         psf_feature: Tuple[FeatureType, str],
         psf_kernel: Dict[str, np.array],
@@ -65,25 +65,28 @@ class AlternativePhisatCalculationTask(EOTask):
         :param input_feature: Input feature holding radiance values.
         :param snr_feature: Output feature with SNR simulated (dummy) values.
         :param psf_feature: Output feature with PSF simulated (dummy) values.
-        :param snr_values: A dictionary of SNR values for Sentinel-2 bands ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"].
+        :param snr_values: A list of SNR values range for Sentinel-2 bands ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"].
         :param psf_kernel: A dictionary of PSF 7x7 kernels for PhiSat bands bands ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"].
         :param l_ref: Spectral Radiance at Aperture (W/m^2/sr/um), a reference radiance used to generate the specific SNR
         """
         self.input_feature = input_feature
         self.snr_feature = snr_feature
         self.psf_feature = psf_feature
+        self.snr_bands_values = {band: np.random.randint(snr_values[0], snr_values[1]) for band in AlternativePhisatCalculationTask.SNR_BANDS}
 
-        if all(
-            [
-                band in AlternativePhisatCalculationTask.SNR_BANDS
-                for band in snr_values.keys()
-            ]
-        ):
-            self.snr_values = snr_values
-        else:
-            raise Exception(
-                "`snr_values` dictionary is missing SNR values for some bands!"
-            )
+        # if all(
+        #     [
+        #         band in AlternativePhisatCalculationTask.SNR_BANDS
+        #         for band in snr_values.keys()
+        #     ]
+        # ):
+        #     self.snr_values = snr_values
+        # else:
+        #     raise Exception(
+        #         "`snr_values` dictionary is missing SNR values for some bands!"
+        #     )
+        
+
 
         if all(
             [
@@ -127,7 +130,7 @@ class AlternativePhisatCalculationTask(EOTask):
 
         snr = np.array(
             [
-                self.snr_values[band]
+                self.snr_bands_values[band]
                 for band in AlternativePhisatCalculationTask.SNR_BANDS
             ]
         )
@@ -326,6 +329,7 @@ class BandMisalignmentTask(EOTask):
         output_feature: Tuple[FeatureType, str],
         processing_level: ProcessingLevels,
         std_sea: int = 6,
+        std_land: int = 1,
         interpolation_method: int = cv2.INTER_LINEAR,
     ):
         """Task for simulating L1A or L1B band misalignment
@@ -340,6 +344,7 @@ class BandMisalignmentTask(EOTask):
         self.output_feature = self.parse_feature(output_feature)
         self.processing_level = processing_level
         self.std_sea = std_sea
+        self.std_land = std_land
         self.interpolation_method = interpolation_method
 
     def execute(self, eopatch: EOPatch) -> EOPatch:
@@ -348,7 +353,7 @@ class BandMisalignmentTask(EOTask):
 
         patch_geom = eopatch.bbox.transform(WORLD_GDF.crs.to_epsg()).geometry
         is_in_water = not WORLD_GDF.intersects(patch_geom).any()
-        rand_std = self.std_sea if is_in_water else 1
+        rand_std = self.std_sea if is_in_water else self.std_land
 
         for ts_idx, eop_ts in enumerate(eopatch[self.input_feature]):
             warp_matrix = np.eye(3)[:2, :]

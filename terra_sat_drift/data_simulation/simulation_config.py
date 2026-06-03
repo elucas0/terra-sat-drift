@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import json
-from .phisat2_constants import ProcessingLevels
+from phisat2_constants import ProcessingLevels
 
 @dataclass
 class SimulationSteps:
@@ -46,11 +46,12 @@ class SimulationConfig:
 
     # Band misalignment parameter
     misalignment_std_sea: int = 6
+    misalignment_std_land: int = 1
 
     # SNR/PSF parameters (for alternative Python-based simulation)
-    snr_values: Optional[dict] = None  # e.g., {"B02": 15, "B03": 15, ...}
+    snr_values: Optional[list] = None  # e.g., [20, 250] 
     psf_kernel_sigma: float = 1.0
-    radiance_reference: float = 100.0
+    radiance_reference: float = 100
     
     @classmethod
     def from_dict(cls, config_dict: dict) -> SimulationConfig:
@@ -72,8 +73,9 @@ class SimulationConfig:
             "steps": self.steps.as_dict(),
             "phisat2_exec_path": self.phisat2_exec_path,
             "snr_psf_method": self.snr_psf_method,
-            "processing_level": self.processing_level,
+            "processing_level": str(self.processing_level),
             "misalignment_std_sea": self.misalignment_std_sea,
+            "misalignment_std_land": self.misalignment_std_land,
             "snr_values": self.snr_values,
             "psf_kernel_sigma": self.psf_kernel_sigma,
             "radiance_reference": self.radiance_reference,

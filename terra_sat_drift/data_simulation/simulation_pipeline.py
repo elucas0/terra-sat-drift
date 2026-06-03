@@ -23,10 +23,12 @@ from phisat2_utils import (
     CalculateRadianceTask,  
     CalculateReflectanceTask,  
     PhisatCalculationTask,
+    AlternativePhisatCalculationTask,
     ResamplingTask,
     LoadS2FileTask
     
 )
+from utils.psf_utils import get_psf_kernels_dict
 from phisat2_constants import ProcessingLevels  
 
 def _load_metadata_from_file(tiff_path: Path | str, metadata_dir: Path) -> dict:
@@ -193,8 +195,7 @@ def simulate_with_executor(
                 acquisition_date = _get_acquisition_date_from_country(s2_file, metadata_file)
             else:
                 raise ValueError("Either metadata_file or metadata_dir must be provided to load metadata for simulation")
-
-            output_file = f"{output_dir}/simulated_{config.processing_level.name}_{s2_file_name}"
+            output_file = f"{output_dir}/v1.1/data/flood_events/HandLabeled/S2Hand/simulated_{config.processing_level.name}_{s2_file_name}"
 
             exec_args.append({
                 "s2_tiff_path": str(s2_file),
@@ -262,33 +263,51 @@ def simulate_with_executor(
                 (FeatureType.DATA, pan_feature_res),
                 (FeatureType.DATA, "S2_MISALIGNED"),
                 processing_level=ProcessingLevels.L1C,
-                std_sea=6,
+                std_sea=config.misalignment_std_sea,
+                std_land=config.misalignment_std_land,
                 interpolation_method=cv2.INTER_NEAREST,
             )
         )
         # Remove resampled input feature to free memory
         task_list.append(RemoveFeatureTask([(FeatureType.DATA, pan_feature_res)]))
 
-    # Task 6: SNR simulation (if enabled and using executable)
-    if (config.steps.snr_simulation and 
-        config.snr_psf_method == "executable" and 
-        config.phisat2_exec_path):
-        
+    # Task 6: SNR simulation (if enabled)
+    if config.steps.snr_simulation:
         input_feature = "S2_MISALIGNED" if config.steps.band_misalignment else (
             "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
                 "S2_RADIANCE_RES" if config.steps.radiance else "S2_BANDS_RES"
             )
         )
-        task_list.append(
-            PhisatCalculationTask(
-                input_feature=(FeatureType.DATA, input_feature),
-                output_feature=(FeatureType.DATA, "L_out_SNR"),
-                executable=config.phisat2_exec_path,
-                calculation="SNR",
+        
+        if config.snr_psf_method == "executable" and config.phisat2_exec_path:
+            task_list.append(
+                PhisatCalculationTask(
+                    input_feature=(FeatureType.DATA, input_feature),
+                    output_feature=(FeatureType.DATA, "L_out_SNR"),
+                    executable=config.phisat2_exec_path,
+                    calculation="SNR",
+                )
             )
-        )
+        elif config.snr_psf_method == "alternative" and config.snr_values is not None:
+            # Preparing PSF kernels for AlternativePhisatCalculationTask
+            # Note: AlternativePhisatCalculationTask performs both SNR and PSF in one execute() call
+            psf_kernels = get_psf_kernels_dict(
+                sigma=config.psf_kernel_sigma,
+                bands=AlternativePhisatCalculationTask.KERNEL_BANDS,
+                size=7
+            )
+            task_list.append(
+                AlternativePhisatCalculationTask(
+                    input_feature=(FeatureType.DATA, input_feature),
+                    snr_feature=(FeatureType.DATA, "L_out_SNR"),
+                    psf_feature=(FeatureType.DATA, "L_out_PSF"),
+                    snr_values=config.snr_values,
+                    psf_kernel=psf_kernels,
+                    l_ref=config.radiance_reference,
+                )
+            )
 
-    # Task 7: PSF filtering (if enabled and using executable)
+    # Task 7: PSF filtering (if enabled and using executable - skipped for alternative as it's handled in Task 6)
     if (config.steps.psf_filtering and 
         config.snr_psf_method == "executable" and 
         config.phisat2_exec_path):
@@ -308,18 +327,22 @@ def simulate_with_executor(
                 calculation="PSF",
             )
         )
-        # Remove SNR output if it exists, and remove misalignment feature to free memory
-        features_to_remove = []
-        if config.steps.snr_simulation:
-            features_to_remove.append((FeatureType.DATA, "L_out_SNR"))
-        if config.steps.band_misalignment:
+        
+    # Cleanup intermediate features
+    features_to_remove = []
+    if config.steps.snr_simulation and config.snr_psf_method == "executable" and config.steps.psf_filtering:
+        features_to_remove.append((FeatureType.DATA, "L_out_SNR"))
+    if config.steps.band_misalignment:
+        # Misaligned feature is consumed by either Task 6 or Task 7
+        if config.steps.snr_simulation or (config.steps.psf_filtering and config.snr_psf_method == "executable"):
             features_to_remove.append((FeatureType.DATA, "S2_MISALIGNED"))
-        if features_to_remove:
-            task_list.append(RemoveFeatureTask(features_to_remove))
+    
+    if features_to_remove:
+        task_list.append(RemoveFeatureTask(features_to_remove))
 
     # Task 8: Reflectance conversion (if L1C and enabled)
     if config.steps.reflectance_conversion and config.processing_level.value == ProcessingLevels.L1C.value:
-        input_feature = "L_out_PSF" if config.steps.psf_filtering else (
+        input_feature = "L_out_PSF" if (config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative")) else (
             "L_out_SNR" if config.steps.snr_simulation else (
                 "S2_MISALIGNED" if config.steps.band_misalignment else (
                     "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
@@ -337,11 +360,11 @@ def simulate_with_executor(
         )
         # Remove intermediate processing outputs to free memory before export
         features_to_remove = []
-        if config.steps.psf_filtering:
+        if config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
             features_to_remove.append((FeatureType.DATA, "L_out_PSF"))
-        if config.steps.snr_simulation and not config.steps.psf_filtering:
+        if config.steps.snr_simulation:
             features_to_remove.append((FeatureType.DATA, "L_out_SNR"))
-        if config.steps.band_misalignment and not config.steps.snr_simulation:
+        if config.steps.band_misalignment and not config.steps.snr_simulation and not (config.steps.psf_filtering and config.snr_psf_method == "executable"):
             features_to_remove.append((FeatureType.DATA, "S2_MISALIGNED"))
         if features_to_remove:
             task_list.append(RemoveFeatureTask(features_to_remove))
@@ -349,7 +372,7 @@ def simulate_with_executor(
     # Determine which feature to export
     if config.steps.reflectance_conversion and config.processing_level.value == ProcessingLevels.L1C.value:
         export_feature = "S2_REFLECTANCE"
-    elif config.steps.psf_filtering:
+    elif config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
         export_feature = "L_out_PSF"
     elif config.steps.snr_simulation:
         export_feature = "L_out_SNR"
@@ -359,7 +382,7 @@ def simulate_with_executor(
     # Task 9: Export to TIFF (final task)
     task_list.append(ExportToTiffTask(
         feature=(FeatureType.DATA, export_feature),
-        path=str(output_dir),
+        path=f"{output_dir}/v1.1/data/flood_events/HandLabeled/S2Hand",
         image_dtype=np.float32
     ))
 
