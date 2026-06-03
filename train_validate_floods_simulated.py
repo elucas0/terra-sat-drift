@@ -13,6 +13,7 @@ warnings.filterwarnings('ignore')
 from terratorch.tasks import SemanticSegmentationTask
 from terratorch import BACKBONE_REGISTRY
 from terratorch.datamodules import GenericNonGeoSegmentationDataModule
+from terratorch.datamodules.sen1floods11 import Sen1Floods11NonGeoDataModule
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
@@ -23,7 +24,6 @@ import albumentations as A
 
 
 from terra_sat_drift.data_simulation.phisat2_constants import S2_BANDS_NAMES, S2_BANDS, S2_PAN_BANDS
-
 
 if __name__ == "__main__":
     # Set device
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     # Extract means and stds for all bands
     means = list([stats[f"band_{i+1}"]["mean"] for i in range(8)])
     stds = list([stats[f"band_{i+1}"]["std"] for i in range(8)])
-    TARGET_SIZE = (1078, 1078)
+    TARGET_SIZE = (1088, 1088)  # Must be divisible by patch size (16)
 
     def preprocess_mask(mask, **kwargs):
         clean_mask = np.full(mask.shape, -1, dtype=np.int64)
@@ -53,7 +53,6 @@ if __name__ == "__main__":
         A.Lambda(mask=preprocess_mask),
         A.pytorch.ToTensorV2(),
     ]
-
 
     datamodule = GenericNonGeoSegmentationDataModule(
         batch_size=8,
@@ -126,22 +125,22 @@ if __name__ == "__main__":
         "num_classes": 2,
     }
 
-    # task = SemanticSegmentationTask(
-    #     model_factory="EncoderDecoderFactory",
-    #     model_args=model_args,
-    #     lr=2e-5,
-    #     ignore_index=-1,
-    #     plot_on_val=False,
-    #     loss="ce",
-    #     optimizer="AdamW",
-    #     optimizer_hparams={"weight_decay": 0.05},
-    #     class_names=["background", "flood"],
-    #     freeze_backbone=True,
-    # )
-    task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated/terramind_v1_tiny_simulated/checkpoints/best-val_mIoU-v6.ckpt")
+    task = SemanticSegmentationTask(
+        model_factory="EncoderDecoderFactory",
+        model_args=model_args,
+        lr=2e-5,
+        ignore_index=-1,
+        plot_on_val=False,
+        loss="ce",
+        optimizer="AdamW",
+        optimizer_hparams={"weight_decay": 0.05},
+        class_names=["background", "flood"],
+        freeze_backbone=False,
+    )
+    # task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated/terramind_v1_tiny_simulated/checkpoints/best-val_mIoU-v6.ckpt")
 
     
-    experiment_name = f"terramind_v1_{backbone_size}_simulated"
+    experiment_name = f"terramind_v1_{backbone_size}_simulated_no_normalization"
     output_dir="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated"
     logger = WandbLogger(project="terra-sat-drift", name=experiment_name, save_dir=root_dir)
 
@@ -156,13 +155,13 @@ if __name__ == "__main__":
 
     early_stopping = EarlyStopping(
         monitor="val/mIoU",
-        patience=10,
+        patience=30,
         mode="max",
         verbose=True,
     )
 
     trainer = Trainer(
-        max_epochs=50,
+        max_epochs=100,
         callbacks=[checkpoint_callback, early_stopping],
         logger=logger,
         log_every_n_steps=10,
@@ -173,7 +172,9 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
     datamodule.setup(stage="fit")
-    # trainer.fit(model=task, datamodule=datamodule)
+
+    trainer.fit(model=task, datamodule=datamodule)
+    
+    datamodule.setup(stage="test")
     trainer.test(model=task, dataloaders=datamodule)

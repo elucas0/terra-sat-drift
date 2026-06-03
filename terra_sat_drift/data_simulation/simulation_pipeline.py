@@ -6,13 +6,16 @@ from pathlib import Path
 import numpy as np
 import json
 import cv2
+import logging
 from datetime import datetime
+from typing import Optional
 
 from eolearn.core.eonode import linearly_connect_tasks
 from eolearn.core.eoworkflow import EOWorkflow
 from eolearn.core.eoexecution import EOExecutor
-from eolearn.io.raster_io import ExportToTiffTask
 from eolearn.core.constants import FeatureType
+from eolearn.core import EOPatch, EOTask
+from eolearn.io.raster_io import ExportToTiffTask
 from simulation_config import SimulationConfig
 import pandas as pd
 from eolearn.core.core_tasks import RemoveFeatureTask
@@ -25,11 +28,13 @@ from phisat2_utils import (
     PhisatCalculationTask,
     AlternativePhisatCalculationTask,
     ResamplingTask,
-    LoadS2FileTask
+    LoadS2FileTask,
+    LoadS2DatasetSampleTask
     
 )
 from utils.psf_utils import get_psf_kernels_dict
-from phisat2_constants import ProcessingLevels  
+from phisat2_constants import ProcessingLevels
+from torchgeo.datasets import NonGeoDataset
 
 def _load_metadata_from_file(tiff_path: Path | str, metadata_dir: Path) -> dict:
     """Load metadata JSON file associated with a TIFF file.
@@ -71,153 +76,111 @@ def _load_metadata_from_file(tiff_path: Path | str, metadata_dir: Path) -> dict:
     print(f"Warning: No metadata file found for {tiff_path.name} (ID: {id_str})")
     raise FileNotFoundError("No metadata file found")
 
-def _get_acquisition_date_from_country(s2_tiff_path: Path | str, metadata: dict) -> Optional[datetime]:
-    """Extract acquisition date from Sen1Floods11 metadata by matching bbox coordinates.
-        
-     Matches the center point of the bbox against the geometry polygons in the metadata.
-        
-    Args:
-        s2_tiff_path: Path to the S2 .tiff file.
-        metadata: Loaded geojson metadata dictionary.
-            
-    Returns:
-        datetime object with the acquisition date, or None if no match found.
-        """
-    if metadata is None or "features" not in metadata:
-        print("Warning: No valid metadata provided for acquisition date extraction")
-        
-    try:
-        # Get the location name from the path
-        location_name = Path(s2_tiff_path).stem.split("_")[0].lower()
-            
-        print(location_name)
-        # Search through features to find location of the acquisition
-        for feature in metadata.get("features", []):
-            properties = feature.get("properties", {})
-            location_property = properties.get("location", "").lower()
-            if location_property == location_name:
-                s2_date_str = properties.get("s2_date")
-                if s2_date_str:
-                    # Parse date string (format: "YYYY/MM/DD")
-                    date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                    location = properties.get("location", "Unknown")
-                    return date_obj
-            elif location_property == "cambodia" and location_name == "mekong":
-                # Special case for Cambodia where location name is inconsistent
-                s2_date_str = properties.get("s2_date")
-                if s2_date_str:
-                    date_obj = datetime.strptime(s2_date_str, "%Y/%m/%d")
-                    return date_obj
-        print(f"Warning: No matching metadata found for this location: {location_name}")
-        return None
-    except Exception as e:
-        print(f"Warning: Error matching path {s2_tiff_path} to metadata: {e}")
-        return None
-
-
 def simulate_with_executor(
     config: SimulationConfig,
-    output_dir: str,
-    logs_folder: str,
-    source_dir: Path | None = None,
-    tiff_files: list[Path] | None = None,
-    pattern: str | None = None,
-    metadata_file: dict | None = None,
-    metadata_dir: Path | None = None,
+    dataset: NonGeoDataset,
+    num_samples: int,
+    output_dir: str | Path,
+    logs_folder: str | Path,
     workers: int = 4,
     save_logs: bool = True,
-    status_csv: Path | str | None = None,
+    verbose: bool = False,
+    logger: Optional[logging.Logger] = None,
 ) -> EOExecutor:
-    """Execute parallel simulation using EOExecutor with decomposed task nodes.
+    """Execute parallel simulation using EOExecutor with dataset samples.
 
-    Creates an EOWorkflow by composing individual simulation tasks with linearly_connect_tasks
-    for parallel execution across multiple workers for all S2 .tiff files in the source directory.
+    Iterates through the Sen1Floods11NonGeo dataset using __getitem__, processes
+    each sample through the simulation pipeline, and exports results using EOExecutor.
 
     Args:
         config: SimulationConfig instance defining processing steps and parameters.
-        source_dir: Directory containing raw S2 .tiff files.
-        pattern: Glob pattern for .tiff files.
+        dataset: Sen1Floods11NonGeo dataset instance.
+        num_samples: Number of samples to process from the dataset.
+        output_dir: Directory to save simulated files.
+        logs_folder: Directory to save execution logs.
         workers: Number of parallel workers for execution.
         save_logs: Whether to save execution logs.
-        status_csv: Path to CSV file with simulation status. If provided, only FAILED products are processed.
+        verbose: Enable verbose logging.
+        logger: Optional logger instance for output.
 
     Returns:
         EOExecutor instance with execution results.
-    """    
-    # Load CSV and filter for FAILED products if provided
-    failed_product_ids = set()
-    if status_csv:
-        status_csv = Path(status_csv)
-        if status_csv.exists():
-            df = pd.read_csv(status_csv)
-            failed_products = df[df['simulation_status'] == 'FAILED']
-            failed_product_ids = set(failed_products['product_id'].astype(str).values)
-            print(f"Loaded {len(failed_product_ids)} FAILED products from {status_csv}")
-        else:
-            print(f"Warning: Status CSV not found at {status_csv}")
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
     
-    input_tiff_files = []
-    # Collect all TIFF files using the source directory and pattern, or from provided list
-    if source_dir is not None:
-        # Source dir pattern to filter files
-        if pattern is not None:
-            input_tiff_files = list(source_dir.glob(pattern))
-        else:
-            input_tiff_files = list(source_dir.glob("*.tif"))
-    elif tiff_files is not None:
-        input_tiff_files.extend(tiff_files)
-    else :
-        raise ValueError("Either source_dir or tiff_files must be provided")
-        
-    # Filter files by failed product IDs if CSV was provided
-    if failed_product_ids:
-        input_tiff_files = [f for f in input_tiff_files if any(pid in f.name for pid in failed_product_ids)]
-        print(f"Filtered to {len(input_tiff_files)} FAILED product TIFF files")
-    else:
-        print(f"Found {len(input_tiff_files)} TIFF files to process")
+    output_dir = Path(output_dir)
+    logs_folder = Path(logs_folder)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_folder.mkdir(parents=True, exist_ok=True)
 
-    # Sort files by product ID descently for consistent processing order
-    # input_tiff_files.sort(key=lambda f: int(f.stem.split('_')[0]), reverse=True)    
+    logger.info(f"Processing {num_samples} samples from dataset")
+    logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Logs folder: {logs_folder}")
     
-    # Create execution arguments for each file
+    # Load dataset samples
     exec_args = []
-    metadata = None
-    acquisition_date = None
-    for s2_file in input_tiff_files:
+    for sample_idx in range(min(num_samples, len(dataset))):
         try:
-            s2_file_name =  s2_file.name
-            # Load metadata for this file (when metadata for radiance is already present)
-            if metadata_dir:
-                metadata = _load_metadata_from_file(s2_file, metadata_dir)
-                # We don't need to put the date of the acquisition but EOPatch requires a timestamp
-                acquisition_date = datetime.now()
-            elif metadata_file:
-                acquisition_date = _get_acquisition_date_from_country(s2_file, metadata_file)
+            # Load sample using __getitem__
+            sample = dataset[sample_idx]
+            
+            logger.info(f"Processing sample {sample_idx + 1}/{num_samples}")
+            
+            # Extract image data from sample
+            image = sample.get("image")
+            
+            # Extract metadata if available
+            temporal_coords = sample.get("temporal_coords")
+            location_coords = sample.get("location_coords")
+            
+            if image is None:
+                logger.warning(f"Sample {sample_idx}: No image data found, skipping")
+                continue
+            
+            # Determine acquisition date
+            acquisition_date = None
+            if temporal_coords is not None:
+                try:
+                    # temporal_coords is [year, day_of_year]
+                    year = int(temporal_coords[0, 0].item())
+                    day_of_year = int(temporal_coords[0, 1].item())
+                    acquisition_date = datetime.strptime(f"{year}:{day_of_year}", "%Y:%j")
+                except (ValueError, IndexError, AttributeError):
+                    raise ValueError(f"Invalid temporal coordinates format for sample {sample_idx}")
             else:
-                raise ValueError("Either metadata_file or metadata_dir must be provided to load metadata for simulation")
-            output_file = f"{output_dir}/v1.1/data/flood_events/HandLabeled/S2Hand/simulated_{config.processing_level.name}_{s2_file_name}"
-
+                raise ValueError(f"No temporal coordinates found for sample {sample_idx}, cannot determine acquisition date")
+                        # Create output filename
+            output_filename = f"v1.1/data/flood_events/HandLabeled/S2Hand/simulated_{config.processing_level.name}_sample_{sample_idx:05d}.tif"
+            output_path = output_dir / output_filename
+            
             exec_args.append({
-                "s2_tiff_path": str(s2_file),
-                "output_tiff_path": output_file,
-                "metadata": metadata,
-                "acquisition_date": acquisition_date
+                "image": image,
+                "output_tiff_path": str(output_path),
+                "metadata": None,
+                "acquisition_date": acquisition_date,
+                "location_coords": location_coords,
             })
-            print(exec_args)
-        except FileNotFoundError as e:
-            print(f"Skipping {s2_file.name}: {e}")
+            
+            logger.info(f"Prepared sample {sample_idx} for simulation")
+            
+        except Exception as e:
+            logger.error(f"Error processing sample {sample_idx}: {e}")
+            if verbose:
+                import traceback
+                logger.error(traceback.format_exc())
             continue
 
     if not exec_args:
-        raise ValueError(f"No valid files with metadata found in {source_dir}")
+        raise ValueError(f"No valid samples processed from dataset")
 
-    print(f"\nPrepared {len(exec_args)} execution arguments")
+    logger.info(f"\nPrepared {len(exec_args)} execution arguments")
 
     # Build individual task nodes to be connected with linearly_connect_tasks
-    task_list = []
+    task_list = list[EOTask]()
 
-    # Task 1: Load S2 TIFF file and create EOPatch with metadata
-    task_list.append(LoadS2FileTask())
+    # Task 1: Load S2 data from dataset sample (using __getitem__)
+    task_list.append(LoadS2DatasetSampleTask())
 
     # Task 2: Radiance conversion (if enabled)
     if config.steps.radiance:
@@ -227,7 +190,6 @@ def simulate_with_executor(
                 (FeatureType.DATA, "S2_RADIANCE"),
             )
         )
-        task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_BANDS")]))
 
     # Task 3: Add panchromatic band (if enabled)
     if config.steps.add_panchromatic:
@@ -238,10 +200,6 @@ def simulate_with_executor(
                 (FeatureType.DATA, "BANDS-RAD-PAN"),
             )
         )
-        if config.steps.radiance:
-            task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_RADIANCE")]))
-        else:
-            task_list.append(RemoveFeatureTask([(FeatureType.DATA, "S2_BANDS")]))
 
     # Task 4: Spatial resampling (if any processing step requires it)
     if config.steps.add_panchromatic or config.steps.band_misalignment:
@@ -389,12 +347,15 @@ def simulate_with_executor(
     # Connect all tasks with linearly_connect_tasks
     nodes = linearly_connect_tasks(*task_list)
     workflow = EOWorkflow(nodes)
-
+    
     # Prepare execution kwargs
     execution_kwargs = [
         {
             nodes[0]: {
-                "s2_tiff_path": args["s2_tiff_path"],
+                "image": args["image"],
+                "bands_names": config.bands_names,
+                "temporal_coords": args["temporal_coords"],
+                "location_coords": args["location_coords"],
                 "metadata": args["metadata"],
                 "acquisition_date": args["acquisition_date"]
             },
@@ -410,11 +371,11 @@ def simulate_with_executor(
         workflow=workflow,
         execution_kwargs=execution_kwargs,
         save_logs=save_logs,
-        logs_folder=logs_folder,
+        logs_folder=str(logs_folder),
     )
 
-    print(f"\nStarting parallel execution with {workers} workers...")
+    logger.info(f"\nStarting parallel execution with {workers} workers...")
     executor.run(workers=workers)
 
-    print(f"\nExecution complete. Total tasks: {len(exec_args)}")
+    logger.info(f"\nExecution complete. Total tasks: {len(exec_args)}")
     return executor

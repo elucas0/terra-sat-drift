@@ -36,6 +36,7 @@ class SimulationSteps:
 class SimulationConfig:
     """Configuration for a single simulation experiment."""
 
+    bands_names: list[str]
     # Simulation control
     steps: SimulationSteps = field(default_factory=SimulationSteps)
 
