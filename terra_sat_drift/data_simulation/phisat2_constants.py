@@ -6,7 +6,7 @@ import geopandas as gpd
 
 # CONSTANTS
 CROP_SIZE = (72, 72)
-S2_RESOLUTION = 10
+S2_RESOLUTION = 30
 PHISAT2_RESOLUTION = 4.75
 BBOX_SIZE = 20140  # in metres
 BBOX_SIZE_CROPPED = 19456  # in metres
@@ -35,4 +35,4 @@ class ProcessingLevels(Enum):
     L1C = "L1C"
 
 
-# WORLD_GDF = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+WORLD_GDF = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))

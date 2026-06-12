@@ -29,7 +29,7 @@ from phisat2_constants import (
     S2_RESOLUTION,
     S2_BANDS,
     S2_PAN_BANDS,
-    # WORLD_GDF,
+    WORLD_GDF,
     ProcessingLevels,
 )
 from sentinelhub import (
@@ -48,9 +48,7 @@ from astropy import units as u
 
 
 class AlternativePhisatCalculationTask(EOTask):
-    KERNEL_BANDS = ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"]
-    SNR_BANDS = ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"]
-
+    
     def __init__(
         self,
         input_feature: Tuple[FeatureType, str],
@@ -72,37 +70,17 @@ class AlternativePhisatCalculationTask(EOTask):
         self.input_feature = input_feature
         self.snr_feature = snr_feature
         self.psf_feature = psf_feature
-        self.snr_bands_values = {band: np.random.randint(snr_values[0], snr_values[1]) for band in AlternativePhisatCalculationTask.SNR_BANDS}
-
-        # if all(
-        #     [
-        #         band in AlternativePhisatCalculationTask.SNR_BANDS
-        #         for band in snr_values.keys()
-        #     ]
-        # ):
-        #     self.snr_values = snr_values
-        # else:
-        #     raise Exception(
-        #         "`snr_values` dictionary is missing SNR values for some bands!"
-        #     )
-        
-
-
-        if all(
-            [
-                band in AlternativePhisatCalculationTask.KERNEL_BANDS
-                for band in psf_kernel.keys()
-            ]
-        ):
-            self.psf_kernel = psf_kernel
-        else:
-            raise Exception(
-                "`psf_kernel` dictionary is missing PSF kernel(s) for some bands!"
-            )
-
+        self.snr_values = snr_values
+        self.psf_kernel = psf_kernel
         self.l_ref = l_ref
 
     def add_psf(self, eopatch):
+        bands_names = eopatch.meta_info.get("bands_names", S2_BANDS)
+        
+        # if there is a pan band in bands_names add use the same kernel as first band
+        if "PAN" in bands_names:
+            self.psf_kernel["PAN"] = self.psf_kernel.get(bands_names[0])
+        
         convolved_data = np.concatenate(
             [
                 np.concatenate(
@@ -113,7 +91,7 @@ class AlternativePhisatCalculationTask(EOTask):
                             mode="mirror",
                         )[..., np.newaxis]
                         for band, kernel_band in enumerate(
-                            AlternativePhisatCalculationTask.KERNEL_BANDS
+                            bands_names
                         )
                     ],
                     axis=-1,
@@ -125,20 +103,33 @@ class AlternativePhisatCalculationTask(EOTask):
         eopatch[self.psf_feature] = convolved_data
 
     def add_snr(self, eopatch):
+        rng = np.random.default_rng() # Initialize local RNG
+        
+        bands_names = eopatch.meta_info.get("bands_names", S2_BANDS)
+        
+        # Use rng.integers instead of np.random.randint
+        base_snr = rng.integers(self.snr_values[0], self.snr_values[1])
+        snr_bands_values = {band: base_snr for band in bands_names}
+        
         radiances = eopatch[self.input_feature]
-        random_noise = np.random.normal(size=radiances.shape)
+        
+        # Use rng.normal instead of np.random.normal
+        random_noise = rng.normal(size=radiances.shape)
 
         snr = np.array(
             [
-                self.snr_bands_values[band]
-                for band in AlternativePhisatCalculationTask.SNR_BANDS
+                snr_bands_values[band]
+                for band in bands_names
             ]
         )
         snr = np.reshape(snr, (1, 1, 1, len(snr)))  # t, h, w, d
 
         noisy_radiances = radiances + self.l_ref * random_noise / snr
+        
+        noisy_radiances = np.clip(noisy_radiances, a_min=0.0, a_max=None)
+        
         eopatch[self.snr_feature] = noisy_radiances
-
+        
     def execute(self, eopatch: EOPatch) -> EOPatch:
         self.add_snr(eopatch)
         self.add_psf(eopatch)
@@ -188,17 +179,39 @@ class AddPANBandTask(EOTask):
 
     def execute(self, eopatch: EOPatch) -> EOPatch:
         bands = eopatch[self.input_feature]
+        bands_names = eopatch.meta_info.get("bands_names", S2_BANDS)
 
-        assert (
-            len(PAN_WEIGHTS) == bands.shape[-1]
-        ), "The number of bands of the input features must be 7"
+        # Create a mapping from band name to its weight based on standard S2_BANDS
+        weight_map = {band: weight for band, weight in zip(S2_BANDS, PAN_WEIGHTS)}
 
-        pan_band = np.sum(bands * np.array(PAN_WEIGHTS) / sum(PAN_WEIGHTS), axis=-1)
+        # Get weights for the actual bands present in the input. 
+        # Missing bands or bands not in S2_BANDS get 0.0 weight.
+        current_weights = np.array([weight_map.get(band, 0.0) for band in bands_names])
+
+        # Ensure current_weights matches the number of bands in the input feature
+        if len(current_weights) != bands.shape[-1]:
+            # If mismatch, pad with zeros or truncate (this shouldn't happen if bands_names is correct)
+            if len(current_weights) < bands.shape[-1]:
+                current_weights = np.pad(current_weights, (0, bands.shape[-1] - len(current_weights)))
+            else:
+                current_weights = current_weights[: bands.shape[-1]]
+
+        weight_sum = np.sum(current_weights)
+        if weight_sum > 0:
+            pan_band = np.sum(bands * (current_weights / weight_sum), axis=-1)
+        else:
+            # Fallback if no weights match: simple average
+            pan_band = np.mean(bands, axis=-1)
 
         pan_index = S2_PAN_BANDS.index("PAN")
         new_bands = np.insert(bands, pan_index, pan_band, axis=-1)
 
         eopatch[self.output_feature] = new_bands
+
+        # Update bands_names in meta_info to include the new PAN band
+        new_bands_names = list(bands_names)
+        new_bands_names.insert(pan_index, "PAN")
+        eopatch.meta_info["bands_names"] = new_bands_names
 
         return eopatch
 
@@ -224,6 +237,8 @@ class AddMetadataTask(EOTask):
         Returns:
             EOPatch with added scalar and data features
         """
+        # Add bands_names to meta_info
+        eopatch.meta_info["bands_names"] = S2_BANDS
         # Initialize scalar fields
         dim = len(eopatch.timestamp) if eopatch.timestamp else 1
         eopatch.scalar["earth_sun_dist"] = np.ones((dim, 1))
@@ -296,11 +311,12 @@ class AddMetadataTask(EOTask):
 
 def get_shifts_l1a() -> List[Tuple[float, float]]:
     """Compute random shifts for L1A level"""
+    rng = np.random.default_rng() # Initialize local RNG
 
-    mis_amplitude = np.random.normal(
+    mis_amplitude = rng.normal(
         L1A_RAND_MEAN, L1A_RAND_STD, size=(len(S2_PAN_BANDS),)
     ) + np.array(L1A_RELATIVE_SHIFTS)
-    mis_angle = np.random.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
+    mis_angle = rng.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
 
     shifts = (mis_amplitude * (np.cos(mis_angle), np.sin(mis_angle))).T
 
@@ -312,9 +328,10 @@ def get_shifts_l1a() -> List[Tuple[float, float]]:
 
 def get_shifts_l1b(rand_std: int) -> List[Tuple[float, float]]:
     """Compute random shifts for L1B level"""
+    rng = np.random.default_rng() # Initialize local RNG
 
-    mis_amplitude = np.random.normal(0, rand_std, size=(len(S2_PAN_BANDS),))
-    mis_angle = np.random.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
+    mis_amplitude = rng.normal(0, rand_std, size=(len(S2_PAN_BANDS),))
+    mis_angle = rng.uniform(low=0, high=2 * np.pi, size=(len(S2_PAN_BANDS),))
 
     shifts = (mis_amplitude * (np.cos(mis_angle), np.sin(mis_angle))).T
     shifts[2, :] = np.array([0.0, 0.0])
@@ -376,8 +393,7 @@ class BandMisalignmentTask(EOTask):
                     M=warp_matrix,
                     dsize=(eop_ts_band.shape[1], eop_ts_band.shape[0]),  # (width, height) format for OpenCV
                     flags=self.interpolation_method,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0,
+                    borderMode=cv2.BORDER_REFLECT_101,
                 )
                 bands_shifted.append(band)
 
@@ -429,12 +445,15 @@ class CalculateRadianceTask(EOTask):
         self.input_feature = self.parse_feature(input_feature)
         self.output_feature = self.parse_feature(output_feature)
 
-    # TODO find a way to pass the band_names without hardcoding them in the task, e.g. as a parameter of the task or as metadata of the eopatch
-    def execute(self, eopatch, bands_names: List[str]):
+    def execute(self, eopatch: EOPatch) -> EOPatch:
+        assert "bands_names" in eopatch.meta_info, "bands_names not found in eopatch.meta_info"
+        bands_names = eopatch.meta_info["bands_names"]
+        
         assert all(
             [
                 isinstance(eopatch.scalar[f"sol_irr_{band}"], np.ndarray)
                 for band in bands_names
+                if band != "PAN"
             ]
         )
         assert isinstance(eopatch.scalar["earth_sun_dist"], np.ndarray)
@@ -447,7 +466,14 @@ class CalculateRadianceTask(EOTask):
             / np.pi
         )
         
-        print(factor)
+        # We don't have the irradiance for the PAN band, so we compute it as weighted sum
+        if "PAN" in bands_names and "sol_irr_PAN" not in eopatch.scalar:
+            sol_irr_pan = 0.0
+            weight_dict = dict(zip(S2_BANDS, PAN_WEIGHTS))
+            for band in bands_names:
+                if band in weight_dict:
+                    sol_irr_pan += eopatch.scalar[f"sol_irr_{band}"] * weight_dict[band]
+            eopatch.scalar["sol_irr_PAN"] = sol_irr_pan
 
         solar_irradiances = np.concatenate(
             [eopatch.scalar[f"sol_irr_{band}"][:, :, np.newaxis] for band in bands_names],
@@ -482,19 +508,26 @@ class CalculateReflectanceTask(EOTask):
         self.processing_level = processing_level
 
     def execute(self, eopatch: EOPatch) -> EOPatch:
+        assert "bands_names" in eopatch.meta_info, "bands_names not found in eopatch.meta_info"
+        bands_names = eopatch.meta_info["bands_names"]
+        
         if self.processing_level.value == ProcessingLevels.L1C.value:
+            bands_names = eopatch.meta_info.get("bands_names", bands_names)
             assert all(
                 [
                     isinstance(eopatch.scalar[f"sol_irr_{band}"], np.ndarray)
-                    for band in S2_BANDS
+                    for band in bands_names
+                    if band != "PAN"
                 ]
             )
             assert isinstance(eopatch.scalar["earth_sun_dist"], np.ndarray)
 
             # We don't have the irradiance for the PAN band, so we compute it as weighted sum
             sol_irr_pan = 0.0
-            for nband, band in enumerate(S2_BANDS):
-                sol_irr_pan += eopatch.scalar[f"sol_irr_{band}"] * PAN_WEIGHTS[nband]
+            weight_dict = dict(zip(S2_BANDS, PAN_WEIGHTS))
+            for band in bands_names:
+                if band in weight_dict:
+                    sol_irr_pan += eopatch.scalar[f"sol_irr_{band}"] * weight_dict[band]
 
             eopatch.scalar["sol_irr_PAN"] = sol_irr_pan
 
@@ -506,7 +539,7 @@ class CalculateReflectanceTask(EOTask):
             solar_irradiances = np.concatenate(
                 [
                     eopatch.scalar[f"sol_irr_{band}"][:, :, np.newaxis]
-                    for band in S2_PAN_BANDS
+                    for band in bands_names
                 ],
                 axis=-1,
             )
@@ -547,19 +580,53 @@ class PhisatCalculationTask(EOTask):
             input_npy = os.path.join(temp_dir, "input.npy")
             output_npy = os.path.join(temp_dir, "output.npy")
 
+            data = eopatch[self.input_feature]
+            bands_names = eopatch.meta_info.get("bands_names", [])
+
+            # Re-align bands to match S2_PAN_BANDS (8 bands) expected by the executable
+            # S2_PAN_BANDS = ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"]
+            aligned_data = np.zeros((*data.shape[:-1], len(S2_PAN_BANDS)), dtype=np.float32)
+            
+            # Map existing bands to their positions in S2_PAN_BANDS
+            for i, band in enumerate(S2_PAN_BANDS):
+                if band in bands_names:
+                    idx = bands_names.index(band)
+                    aligned_data[..., i] = data[..., idx]
+                elif band == "B08" and "B8A" in bands_names:
+                    # Fallback for B8A if B08 is missing
+                    idx = bands_names.index("B8A")
+                    aligned_data[..., i] = data[..., idx]
+                # Other missing bands will stay as 0.0
+
+            print(f"[{self.calculation}] Aligned input feature {self.input_feature} from {data.shape} to {aligned_data.shape}")
+
             # temporary write input feature to numpy
-            np.save(input_npy, eopatch[self.input_feature])
+            np.save(input_npy, aligned_data)
 
             # run exec
-            subprocess.run(
-                f"{self.executable} {self.calculation} {input_npy} {output_npy}".split(
-                    " "
-                ),
-                check=True,
-            )
+            try:
+                result = subprocess.run(
+                    f"{self.executable} {self.calculation} {input_npy} {output_npy}".split(
+                        " "
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                if result.stdout:
+                    print(f"[{self.calculation}] stdout: {result.stdout}")
+            except subprocess.CalledProcessError as e:
+                print(f"[{self.calculation}] Command failed with exit code {e.returncode}")
+                print(f"[{self.calculation}] stderr: {e.stderr}")
+                print(f"[{self.calculation}] stdout: {e.stdout}")
+                raise
 
             # read temp output
-            eopatch[self.output_feature] = np.load(output_npy)
+            output_data = np.load(output_npy)
+            eopatch[self.output_feature] = output_data
+            
+            # Update meta_info with the new band names (the 8 bands expected/produced)
+            eopatch.meta_info["bands_names"] = S2_PAN_BANDS
 
         # return eopatch with new feature
         return eopatch
@@ -732,6 +799,7 @@ class LoadS2FileTask(EOTask):
         s2_data = s2_data[band_indices, :, :]
         s2_data = np.transpose(s2_data, (1, 2, 0))
         eopatch = EOPatch(bbox=bbox, timestamps=[acquisition_date])
+        eopatch.meta_info["bands_names"] = S2_BANDS
         eopatch[FeatureType.DATA, "S2_BANDS"] = s2_data[np.newaxis, :, :, :]
 
         # Add metadata to EOPatch
@@ -784,7 +852,6 @@ class LoadS2DatasetSampleTask(EOTask):
             bands_names: List of band names
             metadata: Optional metadata dictionary
             acquisition_date: Acquisition date for the EOPatch timestamp
-            temporal_coords: Optional temporal coordinates (year, day_of_year)
             location_coords: Optional location coordinates as torch.Tensor [lat, lon]
             **kwargs: Additional arguments (ignored)
             
@@ -797,15 +864,15 @@ class LoadS2DatasetSampleTask(EOTask):
         elif not isinstance(image, np.ndarray):
             image = np.asarray(image)
         
-        # Handle channel ordering: if channels are first dimension, transpose
+        # Handle channel ordering
         if image.ndim == 3:
-            if image.shape[0] in (6, 7, 8, 11, 12, 13):  # Likely channels-first
-                image = np.transpose(image, (1, 2, 0))
+            image = np.transpose(image, (1, 2, 0))
             # Add image data as S2_BANDS (add time dimension: (T, H, W, C))
             image = image[np.newaxis, :, :, :]  # Add time dimension
         
         # Create EOPatch with bbox from lat/lon point
         eopatch = EOPatch(bbox=None, timestamps=[acquisition_date])
+        eopatch.meta_info["bands_names"] = bands_names
                 
         eopatch[FeatureType.DATA, "S2_BANDS"] = image
         
@@ -822,10 +889,26 @@ class LoadS2DatasetSampleTask(EOTask):
                     lat = float(location_coords[0])
                     lon = float(location_coords[1])
                 
-                # Create a small BBox around the point (0.01 degrees ~1km)
-                buffer = 0.01
+                # Calculate buffer in degrees based on image size and S2_RESOLUTION (10m)
+                # 1 degree latitude is approx 111320 meters
+                # 1 degree longitude is approx 111320 * cos(lat) meters
+                h, w = image.shape[1:3]
+                
+                # To ensure square pixels in degrees (which is required by some TIFF readers and simplified processing)
+                # we use the same degree-per-meter conversion for both dimensions based on the latitude.
+                # However, usually for geo-referenced imagery in WGS84, we want constant physical size.
+                # If the goal is square pixels in degrees, we should use a single conversion factor.
+                # If the goal is square pixels in meters (4.75m x 4.75m), the degree sizes must differ.
+                
+                # Use a single degree-to-meter conversion factor (at the equator/approximate)
+                # to ensure that the degree-based BBox is perfectly square if the pixel grid is square.
+                # This ensures PixelSize_X == PixelSize_Y in degree units.
+                deg_per_meter = 1.0 / 111320.0
+                buffer_lat = (h * S2_RESOLUTION / 2.0) * deg_per_meter
+                buffer_lon = (w * S2_RESOLUTION / 2.0) * deg_per_meter
+                
                 bbox = BBox(
-                    [lon - buffer, lat - buffer, lon + buffer, lat + buffer],
+                    [lon - buffer_lon, lat - buffer_lat, lon + buffer_lon, lat + buffer_lat],
                     crs=CRS.WGS84
                 )
                 
@@ -911,7 +994,15 @@ class FetchMetadataTask(EOTask):
         self.input_feature = self.parse_feature(input_feature)
         self.config = config
 
-    def execute(self, eopatch: EOPatch, bands_names: List[str], **kwargs) -> EOPatch:
+    def execute(self, eopatch: EOPatch, bands_names: Optional[List[str]] = None, **kwargs) -> EOPatch:
+        if bands_names is not None:
+            eopatch.meta_info["bands_names"] = bands_names
+        else:
+            bands_names = eopatch.meta_info.get("bands_names")
+        
+        if bands_names is None:
+            raise ValueError("bands_names not found in eopatch.meta_info and not provided to FetchMetadataTask")
+
         if not all([eopatch, eopatch.bbox, eopatch.timestamps]):
             raise ValueError(
                 "FetchMetadataTask needs eopatch to have bbox and temporal data!"
@@ -951,7 +1042,7 @@ class FetchMetadataTask(EOTask):
         dim = len(eopatch.timestamps)
         eopatch.scalar["earth_sun_dist"] = np.ones((dim, 1))
             
-        for s2_band in S2_BANDS:
+        for s2_band in bands_names:
             eopatch.scalar[f"sol_irr_{s2_band}"] = np.ones((dim, 1))
         
         # Handle the case when no products are found in the Copernicus catalogue for the given area and time range
@@ -969,7 +1060,7 @@ class FetchMetadataTask(EOTask):
                 "B11": 245.0,   # SWIR
                 "B12": 85.0,    # SWIR
             }
-            for s2_band in S2_BANDS:
+            for s2_band in bands_names:
                 if s2_band in solar_irradiances:
                     eopatch.scalar[f"sol_irr_{s2_band}"] = np.full(
                         (dim, 1), solar_irradiances[s2_band]
@@ -1000,13 +1091,13 @@ class FetchMetadataTask(EOTask):
                 metadata = self._fetch_metadata_from_copernicus(tile)
 
                 # Extract Earth-Sun distance and solar irradiance from metadata
-                earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp)
+                earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp, bands_names)
                 
                 eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
                 print(f"Earth-Sun distance for tile {tile_idx}: {earth_sun_dist} AU")
 
                 # Populate solar irradiance for each band
-                for s2_band in S2_BANDS:
+                for s2_band in bands_names:
                     if s2_band in solar_irradiances:
                         eopatch.scalar[f"sol_irr_{s2_band}"][tile_idx] = solar_irradiances[s2_band]
 

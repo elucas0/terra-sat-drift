@@ -124,6 +124,10 @@ def simulate_with_executor(
         try:
             # Load sample using __getitem__
             sample = dataset[sample_idx]
+            file_name = Path(dataset.image_files[sample_idx]).stem
+            
+            # Get file path after root without filename
+            file_path = Path(dataset.image_files[sample_idx]).parent.relative_to(dataset.data_root)
             
             logger.info(f"Processing sample {sample_idx + 1}/{num_samples}")
             
@@ -151,7 +155,7 @@ def simulate_with_executor(
             else:
                 raise ValueError(f"No temporal coordinates found for sample {sample_idx}, cannot determine acquisition date")
                         # Create output filename
-            output_filename = f"v1.1/data/flood_events/HandLabeled/S2Hand/simulated_{config.processing_level.name}_sample_{sample_idx:05d}.tif"
+            output_filename = f"{file_path}/simulated_{config.processing_level.name}_{file_name}.tif"
             output_path = output_dir / output_filename
             
             exec_args.append({
@@ -251,7 +255,7 @@ def simulate_with_executor(
             # Note: AlternativePhisatCalculationTask performs both SNR and PSF in one execute() call
             psf_kernels = get_psf_kernels_dict(
                 sigma=config.psf_kernel_sigma,
-                bands=AlternativePhisatCalculationTask.KERNEL_BANDS,
+                bands=config.bands_names,
                 size=7
             )
             task_list.append(
@@ -286,18 +290,6 @@ def simulate_with_executor(
             )
         )
         
-    # Cleanup intermediate features
-    features_to_remove = []
-    if config.steps.snr_simulation and config.snr_psf_method == "executable" and config.steps.psf_filtering:
-        features_to_remove.append((FeatureType.DATA, "L_out_SNR"))
-    if config.steps.band_misalignment:
-        # Misaligned feature is consumed by either Task 6 or Task 7
-        if config.steps.snr_simulation or (config.steps.psf_filtering and config.snr_psf_method == "executable"):
-            features_to_remove.append((FeatureType.DATA, "S2_MISALIGNED"))
-    
-    if features_to_remove:
-        task_list.append(RemoveFeatureTask(features_to_remove))
-
     # Task 8: Reflectance conversion (if L1C and enabled)
     if config.steps.reflectance_conversion and config.processing_level.value == ProcessingLevels.L1C.value:
         input_feature = "L_out_PSF" if (config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative")) else (
@@ -354,7 +346,6 @@ def simulate_with_executor(
             nodes[0]: {
                 "image": args["image"],
                 "bands_names": config.bands_names,
-                "temporal_coords": args["temporal_coords"],
                 "location_coords": args["location_coords"],
                 "metadata": args["metadata"],
                 "acquisition_date": args["acquisition_date"]

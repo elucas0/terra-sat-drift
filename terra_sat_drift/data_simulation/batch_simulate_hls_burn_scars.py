@@ -14,6 +14,14 @@ from simulation_config import SimulationConfig, SimulationSteps
 
 from terratorch.datasets import FireScarsNonGeo
 
+import albumentations as A
+
+
+def _scale_image(image, **kwargs):
+    """Scale image values by 10000."""
+    return image * 10000
+
+
 def setup_logging(output_dir: Path, verbose: bool = False) -> None:
     """Setup logging configuration."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -67,12 +75,23 @@ def simulate_hls_burn_scars(
     logger.info(f"Split: {split}")
     logger.info(f"Max files: {max_files}")
     logger.info("=" * 80)
+    
+    bands=["B02", "B03", "B04", "B8A"]
+    bands_names = ["BLUE", "GREEN", "RED", "NIR_NARROW"]
+    
+    # Scale to 0-10000 range since HLS data is typically in values between 0 and 1
+    transform = A.Compose([
+        A.Lambda(image=_scale_image),
+        A.pytorch.ToTensorV2(),
+    ])
 
     # Load dataset
     try:
         dataset = FireScarsNonGeo(
             data_root=str(dataset_root),
             split=split,
+            bands=bands_names,
+            transform=transform,
             use_metadata=True,  # Enable metadata loading for location and temporal info
         )
 
@@ -101,14 +120,20 @@ def simulate_hls_burn_scars(
         }
 
     steps_obj = SimulationSteps(**simulation_steps)
+    snr_values = [20, 250]
 
     # Create simulation config and pipeline
     config = SimulationConfig(
-        bands_names=["B02", "B03", "B04", "B8A", "B11", "B12"],  # HLS burn scars bands
+        bands_names=bands,
         steps=steps_obj,
         processing_level=processing_level,
-        phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
-        snr_psf_method="executable",  # "alternative" or "executable"
+        # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
+        snr_psf_method="alternative",  # "alternative" or "executable"
+        misalignment_std_sea=6,
+        misalignment_std_land=3,
+        snr_values=snr_values,
+        psf_kernel_sigma=1.0,
+        radiance_reference=100.0,
     )
 
     logger.info(f"Simulation steps: {steps_obj.as_dict()}")
@@ -119,13 +144,15 @@ def simulate_hls_burn_scars(
         config=config, 
         dataset=dataset,
         num_samples=num_samples_to_process,
-        output_dir=str(Path(output_dir) / split),
+        output_dir=str(Path(output_dir)),
         logs_folder=str(Path(output_dir) / "logs"),
         workers=4,
         save_logs=True,
         verbose=verbose,
         logger=logger,
     )
+    
+    config.save_json(output_dir / "simulation_config.json")
 
     # Log summary
     logger.info("=" * 80)
@@ -221,7 +248,7 @@ def main():
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
         split=args.split,
-        max_files=1,
+        max_files=args.max_files,
         simulation_steps=simulation_steps,
         processing_level=ProcessingLevels[args.processing_level],
         verbose=args.verbose,

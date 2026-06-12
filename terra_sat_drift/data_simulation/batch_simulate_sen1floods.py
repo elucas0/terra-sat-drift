@@ -70,12 +70,17 @@ def simulate_sen1floods_s2(
     logger.info(f"Split: {split}")
     logger.info(f"Max files: {max_files}")
     logger.info("=" * 80)
+    
+    bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08"]
+    bands_names = ["BLUE", "GREEN", "RED", "RED_EDGE_1", "RED_EDGE_2", "RED_EDGE_3", "NIR_BROAD"]
 
     # Load dataset
     try:
         dataset = Sen1Floods11NonGeo(
             data_root=str(dataset_root),
             split=split,
+            bands=bands_names,
+            constant_scale=1.0,  # No scaling, as we will apply radiance conversion in the pipeline
             use_metadata=True,  # Enable metadata loading for location and temporal info
         )
         num_samples = len(dataset)
@@ -106,15 +111,16 @@ def simulate_sen1floods_s2(
 
     # Create simulation config and pipeline
     config = SimulationConfig(
+        bands_names=bands,
         steps=steps_obj,
         processing_level=processing_level,
-        # phisat2_exec_path="/shared/home/elucas/terra-sat-drift/executables/phisat2_unix.bin",
+        # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
         snr_psf_method="alternative",  # "alternative" or "executable"
         misalignment_std_sea=6,
         misalignment_std_land=6,
         snr_values=snr_values,
-        psf_kernel_sigma=1.5,
-        radiance_reference=100.0,
+        psf_kernel_sigma=2.0,
+        radiance_reference=100,
     )
 
     logger.info(f"Simulation steps: {steps_obj.as_dict()}")
@@ -123,9 +129,9 @@ def simulate_sen1floods_s2(
     
     simulate_with_executor(
         config=config, 
-        tiff_files=s2_files,
+        dataset=dataset,
+        num_samples=num_samples_to_process,
         output_dir=output_dir,
-        metadata_file=metadata_file,
         logs_folder=output_dir / "v1.1/logs",
         workers=4,
         save_logs=True,
@@ -155,7 +161,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="/shared/home/elucas/datasets/sen1floods11_simulated_alt_v1",
+        default="/shared/home/elucas/datasets/sen1floods11_simulated_alt_v3",
         help="Output directory for simulated files",
     )
     parser.add_argument(
@@ -229,7 +235,7 @@ def main():
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
         split=args.split,
-        dataset_type=args.dataset_type,
+        #dataset_type=args.dataset_type,
         max_files=args.max_files,
         simulation_steps=simulation_steps,
         processing_level=ProcessingLevels[args.processing_level],
