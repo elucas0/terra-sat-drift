@@ -17,8 +17,8 @@ from cv2 import warpAffine
 from eolearn.features.utils import ResizeMethod, spatially_resize_image
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from simulation_config import SimulationConfig
-from phisat2_constants import (
+from .simulation_config import SimulationConfig
+from .phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,
@@ -26,7 +26,6 @@ from phisat2_constants import (
     L1A_RELATIVE_SHIFTS,
     PAN_WEIGHTS,
     PHISAT2_RESOLUTION,
-    S2_RESOLUTION,
     S2_BANDS,
     S2_PAN_BANDS,
     WORLD_GDF,
@@ -124,7 +123,9 @@ class AlternativePhisatCalculationTask(EOTask):
         )
         snr = np.reshape(snr, (1, 1, 1, len(snr)))  # t, h, w, d
 
-        noisy_radiances = radiances + self.l_ref * random_noise / snr
+        dynamic_l_ref = radiances.max()
+
+        noisy_radiances = radiances + (dynamic_l_ref * random_noise / snr)
         
         noisy_radiances = np.clip(noisy_radiances, a_min=0.0, a_max=None)
         
@@ -481,7 +482,7 @@ class CalculateRadianceTask(EOTask):
         )
 
         radiances = (
-            eopatch[self.input_feature]
+            (eopatch[self.input_feature])
             * factor
             * solar_irradiances[:, :, np.newaxis, :]
         )
@@ -501,7 +502,7 @@ class CalculateReflectanceTask(EOTask):
 
         :param input_feature: Input feature holding radiance values. Expected 8 bands.
         :param output_feature: Output feature with radiances (for L1A and L1B) or reflectance (for L1C) values.
-        :param processing_level: Processin g level desired. If L1A or L1B no conversion to reflectances is applied.
+        :param processing_level: Processing level desired. If L1A or L1B no conversion to reflectances is applied.
         """
         self.input_feature = self.parse_feature(input_feature)
         self.output_feature = self.parse_feature(output_feature)
@@ -839,7 +840,9 @@ class LoadS2DatasetSampleTask(EOTask):
         self,
         *,
         image: np.ndarray,
+        mask: np.ndarray,
         bands_names: List[str],
+        source_resolution: float,
         metadata: dict | None,
         acquisition_date: datetime,
         location_coords: np.ndarray | None = None,
@@ -863,18 +866,20 @@ class LoadS2DatasetSampleTask(EOTask):
             image = image.cpu().detach().numpy()
         elif not isinstance(image, np.ndarray):
             image = np.asarray(image)
+            
+        # Convert mask to numpy array if needed
+        if hasattr(mask, 'cpu'):  # Check if it's a torch.Tensor
+            mask = mask.cpu().detach().numpy()
+        elif not isinstance(mask, np.ndarray):
+            mask = np.asarray(mask)
+        # Add time and channel dimension to mask
+        mask = mask[np.newaxis, :, :, np.newaxis]  # Shape: (1, H, W, 1)
         
         # Handle channel ordering
         if image.ndim == 3:
             image = np.transpose(image, (1, 2, 0))
             # Add image data as S2_BANDS (add time dimension: (T, H, W, C))
             image = image[np.newaxis, :, :, :]  # Add time dimension
-        
-        # Create EOPatch with bbox from lat/lon point
-        eopatch = EOPatch(bbox=None, timestamps=[acquisition_date])
-        eopatch.meta_info["bands_names"] = bands_names
-                
-        eopatch[FeatureType.DATA, "S2_BANDS"] = image
         
         # Fetch metadata using lat/lon if location_coords are provided
         if location_coords is not None:
@@ -889,7 +894,7 @@ class LoadS2DatasetSampleTask(EOTask):
                     lat = float(location_coords[0])
                     lon = float(location_coords[1])
                 
-                # Calculate buffer in degrees based on image size and S2_RESOLUTION (10m)
+                # Calculate buffer in degrees based on image size and source resolution
                 # 1 degree latitude is approx 111320 meters
                 # 1 degree longitude is approx 111320 * cos(lat) meters
                 h, w = image.shape[1:3]
@@ -904,17 +909,21 @@ class LoadS2DatasetSampleTask(EOTask):
                 # to ensure that the degree-based BBox is perfectly square if the pixel grid is square.
                 # This ensures PixelSize_X == PixelSize_Y in degree units.
                 deg_per_meter = 1.0 / 111320.0
-                buffer_lat = (h * S2_RESOLUTION / 2.0) * deg_per_meter
-                buffer_lon = (w * S2_RESOLUTION / 2.0) * deg_per_meter
+                buffer_lat = (h * source_resolution / 2.0) * deg_per_meter
+                buffer_lon = (w * source_resolution / 2.0) * deg_per_meter
                 
                 bbox = BBox(
                     [lon - buffer_lon, lat - buffer_lat, lon + buffer_lon, lat + buffer_lat],
                     crs=CRS.WGS84
                 )
                 
-                # Update eopatch with bbox for metadata fetching
-                eopatch.bbox = bbox
+                eopatch = EOPatch(bbox=bbox, timestamps=[acquisition_date])
                 
+                eopatch[FeatureType.DATA, "S2_BANDS"] = image
+                eopatch[FeatureType.MASK, "MASK"] = mask
+                eopatch.meta_info["bands_names"] = bands_names
+                eopatch.meta_info["source_resolution"] = source_resolution
+
                 # Fetch metadata from Copernicus API using FetchMetadataTask
                 eopatch = self.fetch_metadata_task.execute(eopatch, bands_names=bands_names)
                 
@@ -938,10 +947,24 @@ class ResamplingTask(EOTask):
         if "sunZenithAngles" in eopatch.data:
             features_to_resize[FeatureType.DATA].append("sunZenithAngles")
 
+        # if mask is present, we need to resize it as well
+        if "MASK" in eopatch.data:
+            resampled_list = []
+            mask = eopatch.data["MASK"]
+            for t in range(mask.shape[0]):
+                resampled_mask = spatially_resize_image(
+                    mask[t],
+                    new_size=new_size_cv2,
+                    resize_method=ResizeMethod.NEAREST,
+                ).astype(np.float32)
+                resampled_list.append(resampled_mask)
+            
+            eopatch[FeatureType.MASK, f"MASK_RES"] = np.array(resampled_list)
+
         s2_data_shape = eopatch.data[self.pan_feature].shape
         new_size = (
-            int((s2_data_shape[1] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
-            int((s2_data_shape[2] * S2_RESOLUTION) / PHISAT2_RESOLUTION),
+            int((s2_data_shape[1] * eopatch.meta_info["source_resolution"]) / PHISAT2_RESOLUTION),
+            int((s2_data_shape[2] * eopatch.meta_info["source_resolution"]) / PHISAT2_RESOLUTION),
         )
         
         new_size_cv2 = (new_size[0], new_size[1]) # cv2 uses (width, height)
@@ -1017,6 +1040,7 @@ class FetchMetadataTask(EOTask):
         
         start_date = eopatch.timestamps[0].strftime("%Y-%m-%d")
         end_date = eopatch.timestamps[-1].strftime("%Y-%m-%d")
+        print(f"Fetching metadata for area: {area}, start_date: {start_date}, end_date: {end_date}")
         prod_type = "S2MSI2A"
 
         # Build OData query for Copernicus catalogue
@@ -1026,7 +1050,7 @@ class FetchMetadataTask(EOTask):
             and ContentDate/Start lt "+end_date+"T23:59:59.000Z \
             and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' \
             and att/OData.CSC.StringAttribute/Value eq '"+prod_type+"')"
-
+            
         # Fetch all products from Copernicus catalogue
         json_out = requests.get(query_url).json()
         products_list = json_out.get('value', [])
@@ -1094,7 +1118,6 @@ class FetchMetadataTask(EOTask):
                 earth_sun_dist, solar_irradiances = self._extract_irradiance_data(metadata, timestamp, bands_names)
                 
                 eopatch.scalar["earth_sun_dist"][tile_idx] = earth_sun_dist
-                print(f"Earth-Sun distance for tile {tile_idx}: {earth_sun_dist} AU")
 
                 # Populate solar irradiance for each band
                 for s2_band in bands_names:

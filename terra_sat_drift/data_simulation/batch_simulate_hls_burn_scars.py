@@ -28,13 +28,19 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> None:
     log_file = output_dir / "simulation.log"
 
     level = logging.DEBUG if verbose else logging.INFO
+    
+    # Create handlers and set their levels explicitly
+    # This prevents root logger level changes (e.g. from eo-learn) 
+    # from causing DEBUG messages to be emitted by these handlers.
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(level)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(level)
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(),
-        ],
+        handlers=[file_handler, stream_handler],
     )
     logging.info(f"Logging to {log_file}")
 
@@ -120,19 +126,20 @@ def simulate_hls_burn_scars(
         }
 
     steps_obj = SimulationSteps(**simulation_steps)
-    snr_values = [20, 250]
+    snr_values = [20, 150]
 
     # Create simulation config and pipeline
     config = SimulationConfig(
         bands_names=bands,
+        source_resolution=30.0,  # HLS has 30m resolution
         steps=steps_obj,
         processing_level=processing_level,
         # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
         snr_psf_method="alternative",  # "alternative" or "executable"
         misalignment_std_sea=6,
-        misalignment_std_land=3,
+        misalignment_std_land=6,
         snr_values=snr_values,
-        psf_kernel_sigma=1.0,
+        psf_kernel_sigma=1.5,
         radiance_reference=100.0,
     )
 
@@ -146,7 +153,7 @@ def simulate_hls_burn_scars(
         num_samples=num_samples_to_process,
         output_dir=str(Path(output_dir)),
         logs_folder=str(Path(output_dir) / "logs"),
-        workers=4,
+        workers=1,
         save_logs=True,
         verbose=verbose,
         logger=logger,

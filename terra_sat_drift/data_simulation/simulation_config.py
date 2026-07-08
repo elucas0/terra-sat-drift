@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import json
-from phisat2_constants import ProcessingLevels
+from .phisat2_constants import ProcessingLevels
 
 @dataclass
 class SimulationSteps:
@@ -37,6 +37,8 @@ class SimulationConfig:
     """Configuration for a single simulation experiment."""
 
     bands_names: list[str]
+    source_resolution: float = 10.0  # Source resolution in meters (e.g., Sentinel-2 is 10m)
+    
     # Simulation control
     steps: SimulationSteps = field(default_factory=SimulationSteps)
 

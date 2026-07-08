@@ -133,7 +133,7 @@ def simulate_with_executor(
             
             # Extract image data from sample
             image = sample.get("image")
-            
+            mask = sample.get("mask")  # Not used in simulation but can be included in metadata if needed for export
             # Extract metadata if available
             temporal_coords = sample.get("temporal_coords")
             location_coords = sample.get("location_coords")
@@ -160,6 +160,7 @@ def simulate_with_executor(
             
             exec_args.append({
                 "image": image,
+                "mask": mask,
                 "output_tiff_path": str(output_path),
                 "metadata": None,
                 "acquisition_date": acquisition_date,
@@ -292,7 +293,7 @@ def simulate_with_executor(
         
     # Task 8: Reflectance conversion (if L1C and enabled)
     if config.steps.reflectance_conversion and config.processing_level.value == ProcessingLevels.L1C.value:
-        input_feature = "L_out_PSF" if (config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative")) else (
+        input_feature = "L_out_PSF" if ((config.steps.psf_filtering and config.snr_psf_method == "executable") or (config.steps.snr_simulation and config.snr_psf_method == "alternative")) else (
             "L_out_SNR" if config.steps.snr_simulation else (
                 "S2_MISALIGNED" if config.steps.band_misalignment else (
                     "BANDS-RAD-PAN_RES" if config.steps.add_panchromatic else (
@@ -310,7 +311,7 @@ def simulate_with_executor(
         )
         # Remove intermediate processing outputs to free memory before export
         features_to_remove = []
-        if config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
+        if (config.steps.psf_filtering and config.snr_psf_method == "executable") or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
             features_to_remove.append((FeatureType.DATA, "L_out_PSF"))
         if config.steps.snr_simulation:
             features_to_remove.append((FeatureType.DATA, "L_out_SNR"))
@@ -322,7 +323,7 @@ def simulate_with_executor(
     # Determine which feature to export
     if config.steps.reflectance_conversion and config.processing_level.value == ProcessingLevels.L1C.value:
         export_feature = "S2_REFLECTANCE"
-    elif config.steps.psf_filtering or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
+    elif (config.steps.psf_filtering and config.snr_psf_method == "executable") or (config.steps.snr_simulation and config.snr_psf_method == "alternative"):
         export_feature = "L_out_PSF"
     elif config.steps.snr_simulation:
         export_feature = "L_out_SNR"
@@ -332,8 +333,9 @@ def simulate_with_executor(
     # Task 9: Export to TIFF (final task)
     task_list.append(ExportToTiffTask(
         feature=(FeatureType.DATA, export_feature),
+        image_dtype=np.float32,
+        # This path is note actually used but EOExecutor requires it to be set.
         path=f"{output_dir}/v1.1/data/flood_events/HandLabeled/S2Hand",
-        image_dtype=np.float32
     ))
 
     # Connect all tasks with linearly_connect_tasks
@@ -345,7 +347,9 @@ def simulate_with_executor(
         {
             nodes[0]: {
                 "image": args["image"],
+                "mask": args["mask"],
                 "bands_names": config.bands_names,
+                "source_resolution": config.source_resolution,
                 "location_coords": args["location_coords"],
                 "metadata": args["metadata"],
                 "acquisition_date": args["acquisition_date"]
@@ -358,11 +362,19 @@ def simulate_with_executor(
     ]
     
     # Create and configure EOExecutor
+    # If not verbose, we add a filter to EOExecutor to suppress DEBUG logs in the 
+    # execution-specific log files, since EOExecutor hardcodes DEBUG level for them.
+    logs_filter = None
+    if not verbose:
+        logs_filter = logging.Filter()
+        logs_filter.filter = lambda record: record.levelno >= logging.INFO
+
     executor = EOExecutor(
         workflow=workflow,
         execution_kwargs=execution_kwargs,
         save_logs=save_logs,
         logs_folder=str(logs_folder),
+        # logs_filter=logs_filter,
     )
 
     logger.info(f"\nStarting parallel execution with {workers} workers...")

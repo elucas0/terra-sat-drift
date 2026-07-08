@@ -23,13 +23,19 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> None:
     log_file = output_dir / "simulation.log"
 
     level = logging.DEBUG if verbose else logging.INFO
+    
+    # Create handlers and set their levels explicitly
+    # This prevents root logger level changes (e.g. from eo-learn) 
+    # from causing DEBUG messages to be emitted by these handlers.
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(level)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(level)
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(),
-        ],
+        handlers=[file_handler, stream_handler],
     )
     logging.info(f"Logging to {log_file}")
 
@@ -107,11 +113,12 @@ def simulate_sen1floods_s2(
         }
 
     steps_obj = SimulationSteps(**simulation_steps)
-    snr_values = [20, 250]
+    snr_values = [15, 20]
 
     # Create simulation config and pipeline
     config = SimulationConfig(
         bands_names=bands,
+        source_resolution=10.0,
         steps=steps_obj,
         processing_level=processing_level,
         # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
@@ -119,8 +126,8 @@ def simulate_sen1floods_s2(
         misalignment_std_sea=6,
         misalignment_std_land=6,
         snr_values=snr_values,
-        psf_kernel_sigma=2.0,
-        radiance_reference=100,
+        psf_kernel_sigma=4.0,
+        radiance_reference=10000,
     )
 
     logger.info(f"Simulation steps: {steps_obj.as_dict()}")
@@ -133,7 +140,7 @@ def simulate_sen1floods_s2(
         num_samples=num_samples_to_process,
         output_dir=output_dir,
         logs_folder=output_dir / "v1.1/logs",
-        workers=4,
+        workers=1,
         save_logs=True,
         verbose=verbose,
         logger=logger,
@@ -161,7 +168,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="/shared/home/elucas/datasets/sen1floods11_simulated_alt_v3",
+        default="/shared/home/elucas/datasets/sen1floods11_simulated_alt_v2",
         help="Output directory for simulated files",
     )
     parser.add_argument(

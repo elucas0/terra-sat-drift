@@ -6,7 +6,6 @@ import geopandas as gpd
 
 # CONSTANTS
 CROP_SIZE = (72, 72)
-S2_RESOLUTION = 30
 PHISAT2_RESOLUTION = 4.75
 BBOX_SIZE = 20140  # in metres
 BBOX_SIZE_CROPPED = 19456  # in metres

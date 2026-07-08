@@ -23,33 +23,48 @@ import cv2
 import albumentations as A
 
 
-from terra_sat_drift.data_simulation.phisat2_constants import S2_BANDS_NAMES, S2_BANDS, S2_PAN_BANDS
+from data_simulation.phisat2_constants import S2_BANDS_NAMES, S2_BANDS, S2_PAN_BANDS
 
 if __name__ == "__main__":
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    root_dir=Path("/shared/home/elucas/datasets/sen1floods11_simulated")
+    root_dir=Path("/shared/home/elucas/datasets/sen1floods11_simulated_alt_v5")
 
-    # Load band statistics from JSON file
-    stats_file = f"{root_dir}/v1.1/spectral_statistics.json"
-    with open(stats_file, 'r') as f:
-        stats = json.load(f)
+    TARGET_SIZE = (512, 512)
 
-    # Extract means and stds for all bands
-    means = list([stats[f"band_{i+1}"]["mean"] for i in range(8)])
-    stds = list([stats[f"band_{i+1}"]["std"] for i in range(8)])
-    TARGET_SIZE = (1088, 1088)  # Must be divisible by patch size (16)
+    S2L1C_means = [0.2137385, 0.2018788, 0.2082986, 0.2295651, 0.2854537, 0.3122849, 0.3040560]
+    S2L1C_stds = [0.1675806, 0.1557708, 0.1833702, 0.1823738, 0.1733977, 0.1732131, 0.1679732]
 
     def preprocess_mask(mask, **kwargs):
-        clean_mask = np.full(mask.shape, -1, dtype=np.int64)
-        clean_mask[mask == 0] = 0
+        clean_mask = np.full(mask.shape, 0, dtype=np.int64)
+        # Assign the positive flood class
         clean_mask[mask == 1] = 1
         return clean_mask
 
-    transform = [
-        A.Resize(width=TARGET_SIZE[0], height=TARGET_SIZE[1], interpolation=cv2.INTER_NEAREST),
+    # Random crop for training
+    train_transform = [
+        A.Resize(width=1077, height=1077, interpolation=cv2.INTER_NEAREST),
+        A.RandomCrop(width=TARGET_SIZE[0], height=TARGET_SIZE[1]),
+        # A.Normalize(
+        #     mean=S2L1C_means, 
+        #     std=S2L1C_stds, 
+        #     max_pixel_value=10000.0 
+        # ),
+        A.Lambda(mask=preprocess_mask),
+        A.pytorch.ToTensorV2(),
+    ]
+
+    # Center crop for deterministic validation/testing
+    val_test_transform = [
+        A.Resize(width=1077, height=1077, interpolation=cv2.INTER_NEAREST),
+        A.CenterCrop(width=TARGET_SIZE[0], height=TARGET_SIZE[1]),
+        # A.Normalize(
+        #     mean=S2L1C_means,
+        #     std=S2L1C_stds, 
+        #     max_pixel_value=10000.0 
+        # ),
         A.Lambda(mask=preprocess_mask),
         A.pytorch.ToTensorV2(),
     ]
@@ -58,7 +73,6 @@ if __name__ == "__main__":
         batch_size=8,
         data_root=root_dir,
         
-        # We use the same roots for train/val/test and select samples via the given split files
         train_data_root=root_dir / "v1.1/data/flood_events/HandLabeled/S2Hand",
         train_label_data_root=Path("/shared/home/elucas/datasets/sen1floods11/v1.1/data/flood_events/HandLabeled/LabelHand"),
         val_data_root=root_dir / "v1.1/data/flood_events/HandLabeled/S2Hand",
@@ -66,18 +80,23 @@ if __name__ == "__main__":
         test_data_root=root_dir / "v1.1/data/flood_events/HandLabeled/S2Hand",
         test_label_data_root=Path("/shared/home/elucas/datasets/sen1floods11/v1.1/data/flood_events/HandLabeled/LabelHand"),
 
-        # Split files
         train_split=root_dir / "v1.1/splits/flood_handlabeled/flood_train_data.txt",
         val_split=root_dir / "v1.1/splits/flood_handlabeled/flood_valid_data.txt",
         test_split=root_dir / "v1.1/splits/flood_handlabeled/flood_test_data.txt",
         
-        train_transform=transform,
-        val_transform=transform,
-        test_transform=transform,
-        means=means,
-        stds=stds,
+        img_grep="*_S2Hand.tif",
+        label_grep="*_LabelHand.tif",
+        
+        train_transform=train_transform,
+        val_transform=val_test_transform,
+        test_transform=val_test_transform,
+        
         dataset_bands=[0, 1, 2, 3, 4, 5, 6, 7],
-        output_bands=[0, 1, 2, 3, 4, 5, 6, 7],
+        output_bands=[0, 1, 2, 4, 5, 6, 7],
+        
+        means=[2137.385, 2018.788, 2082.986, 2295.651, 2854.537, 3122.849, 3040.560],
+        stds=[1675.806, 1557.708, 1833.702, 1823.738, 1733.977, 1732.131, 1679.732],
+        
         num_workers=4,
         download=False,
         use_metadata=True,
@@ -97,7 +116,7 @@ if __name__ == "__main__":
 
     SIM_BACKBONE_BANDS = {
         "S2L1C": {
-            "B02": 0, "B03": 1, "B04": 2, "PAN": 3, 
+            "B02": 0, "B03": 1, "B04": 2,
             "B08": 4, "B05": 5, "B06": 6, "B07": 7
         }
     }
@@ -128,20 +147,26 @@ if __name__ == "__main__":
     task = SemanticSegmentationTask(
         model_factory="EncoderDecoderFactory",
         model_args=model_args,
-        lr=2e-5,
+        lr=2e-5,  # The optimal learning rate varies between datasets, we recommend testing different once between 1e-5 and 1e-4. You can perform hyperparameter optimization using terratorch-iterate.  
+        scheduler='ReduceLROnPlateau',  # optionally define a learning rate scheduler and pass hparams
+        scheduler_hparams={
+            'factor': 0.5,  # This "reduce LR on plateau" scheduler multiplies the lr by <factor> when the val loss did not improve for <patience> epochs
+            'patience': 5
+        },
         ignore_index=-1,
-        plot_on_val=False,
-        loss="ce",
+        plot_on_val=True,
+        loss="dice",
         optimizer="AdamW",
         optimizer_hparams={"weight_decay": 0.05},
         class_names=["background", "flood"],
         freeze_backbone=False,
+        class_weights=[0.3, 0.7],
     )
-    # task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated/terramind_v1_tiny_simulated/checkpoints/best-val_mIoU-v6.ckpt")
+    # task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/scratch/terra-sat-drift/outputs/terramind_sen1floods_simulated_v1/terramind_v1_tiny_simulated_v1/checkpoints/best-val_mIoU.ckpt")
 
     
-    experiment_name = f"terramind_v1_{backbone_size}_simulated_no_normalization"
-    output_dir="/shared/home/elucas/terra-sat-drift/outputs/terramind_sen1floods_simulated"
+    experiment_name = f"terramind_v1_{backbone_size}_simulated_v5_{TARGET_SIZE[0]}"
+    output_dir=f"/shared/home/elucas/scratch/terra-sat-drift/outputs/{experiment_name}"
     logger = WandbLogger(project="terra-sat-drift", name=experiment_name, save_dir=root_dir)
 
     checkpoint_callback = ModelCheckpoint(
@@ -155,7 +180,7 @@ if __name__ == "__main__":
 
     early_stopping = EarlyStopping(
         monitor="val/mIoU",
-        patience=30,
+        patience=10,
         mode="max",
         verbose=True,
     )
@@ -166,6 +191,8 @@ if __name__ == "__main__":
         logger=logger,
         log_every_n_steps=10,
         enable_progress_bar=True,
+        accelerator="gpu", 
+        devices=1
     )
     
     logging.basicConfig(
