@@ -113,7 +113,7 @@ def simulate_sen1floods_s2(
         }
 
     steps_obj = SimulationSteps(**simulation_steps)
-    snr_values = [15, 20]
+    snr_values = [5, 10]
 
     # Create simulation config and pipeline
     config = SimulationConfig(
@@ -123,8 +123,8 @@ def simulate_sen1floods_s2(
         processing_level=processing_level,
         # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
         snr_psf_method="alternative",  # "alternative" or "executable"
-        misalignment_std_sea=6,
-        misalignment_std_land=6,
+        misalignment_std_sea=10,
+        misalignment_std_land=10,
         snr_values=snr_values,
         psf_kernel_sigma=4.0,
         radiance_reference=10000,

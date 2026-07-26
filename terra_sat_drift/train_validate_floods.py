@@ -30,11 +30,11 @@ root_dir="/shared/home/elucas/datasets/sen1floods11"
 # TODO: simulated settings, change them to base one
 train_transform = [
     A.RandomCrop(width=TARGET_SIZE[0], height=TARGET_SIZE[1]),
-    A.Normalize(
-        mean=S2L1C_means, 
-        std=S2L1C_stds, 
-        max_pixel_value=10000.0 
-    ),
+    # A.Normalize(
+    #     mean=S2L1C_means, 
+    #     std=S2L1C_stds, 
+    #     max_pixel_value=10000.0 
+    # ),
     A.Lambda(mask=preprocess_mask),
     A.pytorch.ToTensorV2(),
 ]
@@ -43,11 +43,11 @@ train_transform = [
 val_test_transform = [
     A.Resize(width=1077, height=1077, interpolation=cv2.INTER_NEAREST),
     A.CenterCrop(width=TARGET_SIZE[0], height=TARGET_SIZE[1]),
-    A.Normalize(
-        mean=S2L1C_means, 
-        std=S2L1C_stds, 
-        max_pixel_value=10000.0 
-    ),
+    # A.Normalize(
+    #     mean=S2L1C_means, 
+    #     std=S2L1C_stds, 
+    #     max_pixel_value=10000.0 
+    # ),
     A.Lambda(mask=preprocess_mask),
     A.pytorch.ToTensorV2(),
 ]

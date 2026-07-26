@@ -30,12 +30,12 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    root_dir=Path("/shared/home/elucas/datasets/sen1floods11_simulated_alt_v5")
+    root_dir=Path("/shared/home/elucas/datasets/sen1floods11_simulated")
 
     TARGET_SIZE = (512, 512)
 
-    S2L1C_means = [0.2137385, 0.2018788, 0.2082986, 0.2295651, 0.2854537, 0.3122849, 0.3040560]
-    S2L1C_stds = [0.1675806, 0.1557708, 0.1833702, 0.1823738, 0.1733977, 0.1732131, 0.1679732]
+    #S2L1C_means = [0.2137385, 0.2018788, 0.2082986, 0.2295651, 0.2854537, 0.3122849, 0.3040560]
+    #S2L1C_stds = [0.1675806, 0.1557708, 0.1833702, 0.1823738, 0.1733977, 0.1732131, 0.1679732]
 
     def preprocess_mask(mask, **kwargs):
         clean_mask = np.full(mask.shape, 0, dtype=np.int64)
@@ -108,17 +108,14 @@ if __name__ == "__main__":
 
     BACKBONE_SIZES = {"tiny", "small", "base", "large"}
     BACKBONE_NECK_INDICES = {
-        "tiny": [1, 3, 4, 5],
-        "small": [1, 3, 4, 5],
+        "tiny": [2, 5, 8, 11],
+        "small": [2, 5, 8, 11],
         "base": [2, 5, 8, 11],
         "large": [5, 11, 17, 23],
     }
 
-    SIM_BACKBONE_BANDS = {
-        "S2L1C": {
-            "B02": 0, "B03": 1, "B04": 2,
-            "B08": 4, "B05": 5, "B06": 6, "B07": 7
-        }
+    backbone_bands = {
+        "S2L1C": ["BLUE", "GREEN", "RED", "RED_EDGE_1", "RED_EDGE_2", "RED_EDGE_3", "NIR_BROAD"]
     }
 
     backbone_size = "tiny"
@@ -129,7 +126,7 @@ if __name__ == "__main__":
         "backbone": backbone_name,
         "backbone_pretrained": True,
         "backbone_modalities": ["S2L1C"],
-        "backbone_bands": SIM_BACKBONE_BANDS,
+        "backbone_bands": backbone_bands,
         # Necks
         "necks": [
             {"name": "SelectIndices", "indices": neck_indices},
@@ -160,12 +157,13 @@ if __name__ == "__main__":
         optimizer_hparams={"weight_decay": 0.05},
         class_names=["background", "flood"],
         freeze_backbone=False,
+        freeze_decoder=False,
         class_weights=[0.3, 0.7],
     )
     # task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/scratch/terra-sat-drift/outputs/terramind_sen1floods_simulated_v1/terramind_v1_tiny_simulated_v1/checkpoints/best-val_mIoU.ckpt")
 
     
-    experiment_name = f"terramind_v1_{backbone_size}_simulated_v5_{TARGET_SIZE[0]}"
+    experiment_name = f"terramind_v1_{backbone_size}_simulated_{TARGET_SIZE[0]}_updated"
     output_dir=f"/shared/home/elucas/scratch/terra-sat-drift/outputs/{experiment_name}"
     logger = WandbLogger(project="terra-sat-drift", name=experiment_name, save_dir=root_dir)
 

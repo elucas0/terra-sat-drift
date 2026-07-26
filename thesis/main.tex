@@ -1,0 +1,38 @@
+\documentclass[12pt, a4paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\geometry{a4paper, margin=1in}
+\graphicspath{{figures/}}
+
+\title{Assessing the Robustness of TerraMind to Sensor Domain Gap for On-board Processing on the $\Phi$-sat-2 Mission}
+\author{Elouann Lucas \\ Copernicus Master in Digital Earth -- GeoData Track}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\input{chapters/00_abstract}
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{chapters/01_introduction}
+\input{chapters/02_background_litreview}
+\input{chapters/03_methodology}
+\input{chapters/04_results_discussion}
+\input{chapters/05_conclusion}
+
+\bibliographystyle{ieeetr}
+\bibliography{references}
+
+\end{document}

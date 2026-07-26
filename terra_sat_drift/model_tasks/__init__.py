@@ -1,9 +1,7 @@
 """Model service tasks for classification and segmentation."""
 
-from .classification_service import TerraMindClassifier
-from .segmentation_service import TerraMindSegmenter
+from .kd_module import KDSegmentationModule
 
 __all__ = [
-    "TerraMindClassifier",
-    "TerraMindSegmenter",
+    "KDSegmentationModule",
 ]

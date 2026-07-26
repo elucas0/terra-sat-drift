@@ -1,0 +1,107 @@
+\chapter{Methodology}
+\label{chap:methodology}
+
+This chapter presents the complete analytical workflow: the data used and the role each dataset plays, the physics-based degradation pipeline and its calibration, the protocol for measuring the domain gap, the domain-adaptation mechanism adopted (and the one rejected, with the evidence for rejecting it), the cross-architecture distillation procedure, and the evaluation protocol. It closes with a dedicated account of the tooling and reproducibility practices used throughout, as required by the thesis guidelines.
+
+The overall workflow followed a prototyping-implementation-refinement logic rather than a fixed plan executed once. An initial conceptual model -- fine-tune TerraMind on real $\Phi$-sat-2 labels, measure the gap, close it -- was implemented, evaluated against intermediate diagnostics (embedding visualizations, similarity metrics), and revised twice on the basis of what those diagnostics showed: first when a normalization defect was found to be corrupting an early performance baseline (Section~\ref{sec:normalization}), and second when a first domain-adaptation mechanism was found, empirically, not to work (Section~\ref{sec:da-negative-result}), motivating the mechanism actually adopted (Section~\ref{sec:contrastive-mechanism}).
+
+\section{Data}
+\label{sec:data}
+
+\subsection{The co-registered triplet dataset}
+\label{sec:triplets}
+
+The central dataset is a collection of spatially and temporally co-registered image triplets, produced in collaboration with the ESA $\Phi$-lab: real $\Phi$-sat-2 acquisitions (obtained via the ESA Insula Perception platform), the corresponding real Sentinel-2B scene, and a physics-simulated $\Phi$-sat-2 rendering of that same Sentinel-2 scene (Section~\ref{sec:degradation-pipeline}). Candidate scenes were filtered by spatio-temporal proximity between the $\Phi$-sat-2 and Sentinel-2 overpasses and by a cloud-cover threshold on both acquisitions, and precise pixel-level alignment was achieved using the LightGlue deep feature-matching algorithm \cite{Lindenberger_2023_ICCV}, which identifies corresponding semantic keypoints across the two sensors despite their differing spatial and radiometric characteristics.
+
+This dataset carries labels for a single task: land-use/land-cover (LULC) classification, derived from ESA WorldCover 2021 and rasterized onto each triplet's real-$\Phi$-sat-2 footprint. Its role in this thesis is twofold: it is the only real-sensor ground truth available for any downstream task, and its co-registration is what makes it possible to measure sensor-induced covariate shift in TerraMind's latent space (Section~\ref{sec:gap-measurement}) without the scene-content and geography confounds present in prior domain-gap studies that compare unrelated source and target datasets.
+
+\subsection{Simulated degraded flood-segmentation dataset}
+\label{sec:sen1floods-sim}
+
+No real $\Phi$-sat-2 flood dataset exists, because the mission has not yet captured and labeled a flood event; this is a structural limitation of any new mission, not a data-collection oversight. To obtain labeled data for the flood-segmentation task motivating this thesis, the Sen1Floods benchmark is passed through the same degradation pipeline used to build the triplets, producing a graded ladder of $\Phi$-sat-2-like flood scenes at increasing degradation severity. This simulated dataset plays a different role from the triplets: it is the training and evaluation substrate for the flood task itself, not the substrate for measuring the domain gap, since it lacks a real-$\Phi$-sat-2 counterpart against which to validate the simulation directly.
+
+\section{Physics-Based Sensor Degradation Pipeline}
+\label{sec:degradation-pipeline}
+
+The degradation pipeline adapts the simulator developed for the ESA $\Phi$-lab OrbitalAI challenge \cite{longepe2024orbitalai}, which projects labeled Sentinel-2 L1C tiles into the $\Phi$-sat-2 sensor domain by modeling the physical differences between the two instruments as a sequence of operations in radiance space. Because these effects are defined physically on radiance, not reflectance, the pipeline converts source reflectance to top-of-atmosphere radiance, applies each degradation in turn, and converts back to reflectance to yield a simulated L1C product. Pixel coordinates are written $(i,j)$ and spectral band index $b_n$ throughout.
+
+\paragraph{Radiance--reflectance conversion.} TOA reflectance $\rho$ and TOA radiance $L$ are related by
+\begin{equation}
+    \rho(i,j,b_n) = \frac{\pi\, d^2}{E_{\text{SUN}}(b_n)\,\cos\theta_S(i,j)}\, L(i,j,b_n),
+    \label{eq:rad2refl}
+\end{equation}
+where $d$ is the Earth--Sun distance in astronomical units, $E_{\text{SUN}}(b_n)$ the exo-atmospheric solar irradiance for band $b_n$, and $\theta_S(i,j)$ the solar zenith angle at pixel $(i,j)$. The pipeline enters via the inverse of Equation~\eqref{eq:rad2refl} and exits by re-applying it after all radiance-domain degradations; solar irradiance and zenith angle are read from Sentinel-2 tile metadata via the Copernicus Data Space Ecosystem OData API, and no additional solar-irradiance adjustment is needed because Sentinel-2 and $\Phi$-sat-2 spectral bands are close enough in wavelength. Earth--Sun distance is computed from acquisition day-of-year as $d = 1 - 0.01672\cos(0.9856(day - 4)\cdot \pi/180)$.
+
+\paragraph{Spatial resampling.} $\Phi$-sat-2 has a uniform ground sampling distance of 4.75\,m across all bands; Sentinel-2 provides 10\,m (bands B2, B3, B4, B8) and 20\,m (bands B5, B6, B7). Each band is resampled to the common 4.75\,m grid using bicubic interpolation, which limits the resampling artifacts that bilinear interpolation would introduce, though it cannot recover spatial detail the coarser source bands never captured.
+
+\paragraph{Band-to-band misalignment.} Push-broom acquisition co-registers spectral bands imperfectly, since detector rows are exposed at slightly different times and platform micro-vibration perturbs the line of sight during each band's integration window. For the raw L1A product, the displacement of band $b_n$ relative to the previously acquired band follows
+\begin{equation}
+    \|\Delta \mathbf{r}(b_n)\| \sim \mathcal{N}(\mu_{b_n}, \sigma^2), \qquad \mu_{b_n} \in [0.44, 1.1]\ \text{pixels},
+    \label{eq:misalign-l1a}
+\end{equation}
+with direction sampled uniformly over $[0, 2\pi)$ and displacement accumulating across preceding bands. For the geometrically corrected L1C product used throughout this thesis, an on-board co-registration step removes this accumulation, and the residual is instead modeled as a single random displacement of each band relative to a reference band ($\mu_{b_n} = 0$), with standard deviation set higher over water ($\sigma_{\text{sea}} = 6$ pixels) than over land ($\sigma_{\text{land}} = 1$ pixel), reflecting the harder auto-registration problem posed by feature-poor sea surfaces.
+
+\paragraph{Signal-to-noise degradation.} The baseline formulation draws a per-band noise sample from $\mathcal{N}(0,1)$ scaled by the ratio of a reference radiance to a specified SNR,
+\begin{equation}
+    L_{\text{noise}}(i,j,b_n) = \frac{L_{\text{ref}}(b_n)}{\text{SNR}(b_n)}\,\mathcal{N}(0,1),
+    \label{eq:snr-const}
+\end{equation}
+which implicitly treats noise variance as signal-independent, matching the specified SNR only near $L_{\text{ref}}$. A signal-dependent variant, consistent with a shot-noise regime in which SNR scales with the square root of collected signal, rescales the reference SNR to an effective, radiance-dependent value and samples
+\begin{equation}
+    L_{\text{noise}}(i,j,b_n) = \frac{\sqrt{L_{\text{in}}(i,j,b_n)\,L_{\text{ref}}(b_n)}}{\text{SNR}(b_n)}\,\mathcal{N}(0,1).
+    \label{eq:snr-signal}
+\end{equation}
+The implementation used for the calibrated baseline degradation level applies Equation~\eqref{eq:snr-signal}. For the extended sweep used to push beyond nominal $\Phi$-sat-2 noise conditions -- needed to stress-test domain-invariance under more severe degradation than the flight-validated parameters cover -- a simplified variant samples a base SNR uniformly from a specified range and scales noise by the ratio of that SNR to the batch-wise maximum radiance, trading exact photometric fidelity for the ability to sweep degradation severity beyond the calibrated regime. This trade-off is stated explicitly here because it is a deliberate design choice, not an approximation error: the baseline level is flight-parameter-calibrated, and only the extended sweep sacrifices fidelity for range.
+
+\paragraph{Optical blur via MTF/PSF.} Optical blur is modeled through the system modulation transfer function (MTF), aggregating static (optics, detector), dynamic (jitter, platform instability), and smearing (motion) contributions. Assuming shift-invariant blur, imaging reduces to convolution with the system point spread function (PSF). Given the MTF amplitude at Nyquist frequency $M(b_n)$, the MTF is modeled as Gaussian in normalized spatial frequency $k$,
+\begin{equation}
+    \text{MTF}(b_n, k) = e^{\ln M(b_n) \cdot k^2},
+    \label{eq:mtf}
+\end{equation}
+with the corresponding PSF obtained as its inverse Fourier transform and convolved with the radiance image. For $\Phi$-sat-2 the average Nyquist MTF is $M_\Phi(b_n) \approx 0.05$; for Sentinel-2, $M_{\text{S-2}}(b_n) \approx 0.30$. The reference simulation applies Equation~\eqref{eq:mtf} directly with $M_\Phi(b_n)$, leaving the intrinsic Sentinel-2 blur uncorrected; a combined-filter form exists for the case where source blur should also be compensated, but is not required here since the intrinsic Sentinel-2 blur is small relative to $\Phi$-sat-2's.
+
+This pipeline is shared infrastructure within the research group: it also underlies the pre-training and benchmark datasets used by $\Phi$satNet (Section~\ref{sec:phisatnet-background}). The novelty of this thesis lies in how the pipeline's output is used -- to isolate and then close sensor-specific covariate shift via co-registered pairs -- not in the pipeline itself.
+
+\section{Domain Gap Measurement}
+\label{sec:gap-measurement}
+
+\subsection{Normalization protocol}
+\label{sec:normalization}
+
+Raw $\Phi$-sat-2 digital numbers are heavy-tailed; a square-root transform is applied first to bring the distribution closer to Gaussian, followed by a smooth (soft-saturating) clip toward a domain-specific clip value rather than a hard clip, and finally per-domain $z$-score standardization using mean and standard deviation statistics computed separately for each sensor domain (real $\Phi$-sat-2, real Sentinel-2, simulated $\Phi$-sat-2), rather than a single shared normalization applied across domains. An early baseline was corrupted by a normalization defect that caused weight saturation and an artificially depressed performance estimate; correcting it was a precondition for every result reported in Chapter~\ref{chap:results-discussion}.
+
+Because per-domain normalization could, in principle, itself account for an apparent domain gap that is really just a difference in raw value scale, the domain-gap measurement below was run both with and without per-domain normalization. The two conditions produced similar overall results, and per-domain normalization in fact produced \emph{lower} cosine similarity between domains in the encoder's early layers -- the opposite of what a normalization artifact would predict -- indicating that the measured gap in early layers is a genuine representational effect rather than a calibration artifact.
+
+\subsection{Direct and indirect evidence}
+
+The domain gap is measured directly, in latent space, using the co-registered triplets: Maximum Mean Discrepancy (MMD) between the embedding distributions of matched real-$\Phi$-sat-2, real-Sentinel-2, and simulated-$\Phi$-sat-2 patches, and t-SNE visualization of the same embeddings, both computed per encoder layer to locate where the gap concentrates. It is measured indirectly through downstream task performance: LULC mIoU on real $\Phi$-sat-2 data relative to a Sentinel-2-only fine-tuned baseline evaluated zero-shot on the same real data, and flood-segmentation IoU across the simulated degradation ladder of Section~\ref{sec:sen1floods-sim}.
+
+\section{Domain-Adaptation Mechanism}
+\label{sec:da-mechanism}
+
+\subsection{A rejected mechanism: naive exposure to degraded data}
+\label{sec:da-negative-result}
+
+The first mechanism attempted was implicit: fine-tune TerraMind's encoder on the LULC task using degraded, simulated training data, on the premise that exposure to degraded examples during training would itself induce a more domain-invariant representation. Cross-validation against the real-$\Phi$-sat-2/Sentinel-2 triplets showed this does not hold: a model fine-tuned this way shows no lower domain gap to real $\Phi$-sat-2 than a model fine-tuned only on clean Sentinel-2. Standard supervised fine-tuning, even on physics-degraded data produced by a flight-calibrated simulator, applies no explicit pressure toward a sensor-invariant representation, and none emerges as a side effect. An MMD-minimization loss applied directly to the encoder during this fine-tuning stage was also explored as a more explicit alternative and is not pursued further in this thesis, superseded by the mechanism below, which exploits a structural asset -- co-registration -- that a generic MMD objective does not use.
+
+\subsection{Adopted mechanism: paired-contrastive triplet alignment}
+\label{sec:contrastive-mechanism}
+
+The co-registered triplet dataset provides something most domain-adaptation settings lack: for every training example, the identical underlying scene observed by two or three different sensors. This licenses a directly supervised alignment objective rather than an unpaired one: a contrastive loss that pulls the embeddings of matched real-$\Phi$-sat-2, real-Sentinel-2, and simulated-$\Phi$-sat-2 patches of the same scene together, while pushing apart embeddings of unrelated scenes, regardless of which sensor produced each embedding. This directly penalizes the encoder for representing sensor identity, rather than only scene content, and does so using the strongest available supervisory signal -- exact scene correspondence -- instead of matching marginal distributions between unpaired sensor domains as an MMD-style objective would.
+
+\section{Cross-Architecture Knowledge Distillation}
+\label{sec:kd}
+
+TerraMind's ViT-based encoder cannot run on the $\Phi$-sat-2 on-board processor: the Myriad 2 VPU's supported operator set has no dynamic-axes support, which ViT inference requires regardless of model size. Compression must therefore cross architecture families, from ViT teacher to CNN student, rather than compress within the ViT family as some prior on-board GeoFM work does.
+
+Two placements for the domain-invariance objective were considered. The first pre-bakes invariance into the TerraMind teacher via the contrastive mechanism above, then performs standard distillation, so the student inherits invariance passively by mimicking an already-invariant teacher. The second applies the paired-contrastive triplet loss directly to the student's own embeddings during distillation, so the student is trained for cross-sensor consistency directly, rather than only for matching the teacher's outputs. This thesis adopts the second: the contrastive triplet loss is applied to the student CNN during distillation, alongside the standard distillation objective against the teacher's outputs. This is the central methodological contribution of the thesis, and its evaluation does not depend on any prior baking-in of invariance at the teacher stage -- the two placements make different, separable claims, and this thesis tests the stronger one, that distillation itself can be the mechanism that instills domain-invariance in the deployable model rather than a step that merely hopes to preserve it.
+
+\section{Evaluation Protocol}
+\label{sec:evaluation-protocol}
+
+Three evaluations follow from the mechanisms above. First, LULC classification on real $\Phi$-sat-2 data, comparing the contrastive-KD-distilled student against a Sentinel-2-only baseline and against a student distilled with the standard response/logit-only objective alone, since real ground truth exists only for this task. Second, flood segmentation across the simulated degradation ladder, to characterize how gracefully performance degrades with increasing sensor-noise severity. Third, a few-shot label-efficiency comparison against $\Phi$satNet (Section~\ref{sec:phisatnet-background}) on matched small label budgets, testing directly whether adapting TerraMind's broad, diverse pre-training generalizes to $\Phi$-sat-2 with fewer labels than $\Phi$satNet's mission-specific pre-training requires -- the empirical test of this thesis's central bet, reported alongside the possibility that it does not hold (Section~\ref{sec:results-discussion}).
+
+\section{Tools, Software Environment, and Reproducibility}
+\label{sec:reproducibility}
+
+The degradation pipeline and dataset construction are implemented as modular EOTask objects within the \texttt{eo-learn} framework, orchestrated through a versioned \texttt{SimulationConfig} configuration object rather than hard-coded parameters, so that a given degradation run (baseline-calibrated or extended-sweep) is fully specified by its configuration rather than by code edits. Triplet and LULC datasets are stored in HDF5 with an accompanying manifest recording per-patch provenance and train/validation/test split assignment (fixed random seed, positional split), enabling exact reproduction of any reported split. Model training (TerraMind fine-tuning, contrastive-KD distillation) is implemented in PyTorch. The codebase is organized as a single versioned Python package (\texttt{terra\_sat\_drift}) with submodules separating data simulation, dataset loading, model training tasks, and drift analysis, under standard git version control, so that each experiment reported in Chapter~\ref{chap:results-discussion} corresponds to a specific, retrievable commit and configuration rather than an undocumented one-off script.
