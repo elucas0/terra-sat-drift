@@ -11,9 +11,18 @@ import torch.nn.functional as F
 import torchmetrics
 import lightning.pytorch as pl
 
+from matplotlib.colors import to_rgb
 from torchmetrics import ClasswiseWrapper
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 from lightning.pytorch.loggers import WandbLogger
+
+try:
+    from ..dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
+except ImportError:
+    try:
+        from dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
+    except ImportError:
+        NO_LABEL_COLOR, WC_CLASS_COLORS = "#000000", None
 
 
 class KDSegmentationModule(pl.LightningModule):
@@ -290,8 +299,18 @@ class KDSegmentationModule(pl.LightningModule):
     # ------------------------------------------------------------------
     @staticmethod
     def _build_palette(num_classes: int, class_colors: Optional[Sequence[Sequence[float]]]) -> np.ndarray:
+        """Colour table for the qualitative plots, index-aligned with class ids.
+
+        Defaults to the official ESA WorldCover legend when the class count
+        matches that task, so the training-time plots use the same colours as
+        the datasets' own `plot` methods and the dataset report figures. This
+        module is task-generic, so any other class count (e.g. 2-class floods)
+        falls back to a qualitative colormap.
+        """
         if class_colors is not None:
             return np.asarray(class_colors, dtype=float)
+        if WC_CLASS_COLORS is not None and num_classes == len(WC_CLASS_COLORS):
+            return np.asarray([to_rgb(c) for c in WC_CLASS_COLORS], dtype=float)
         cmap = plt.get_cmap("tab20" if num_classes <= 20 else "gist_ncar")
         colors = [cmap(i / max(num_classes - 1, 1))[:3] for i in range(num_classes)]
         return np.asarray(colors, dtype=float)
@@ -312,7 +331,9 @@ class KDSegmentationModule(pl.LightningModule):
         """Maps a (H, W) integer label map to an (H, W, 3) RGB image using self.class_colors."""
         label_map = label_map.astype(int)
         h, w = label_map.shape
-        out = np.full((h, w, 3), 0.5, dtype=np.float32)  # gray for ignore/out-of-range pixels
+        # Ignore/out-of-range pixels take the same no-label colour the datasets'
+        # own `plot` uses, so the two sets of figures can be read side by side.
+        out = np.full((h, w, 3), to_rgb(NO_LABEL_COLOR), dtype=np.float32)
         valid = (label_map >= 0) & (label_map < self.num_classes)
         out[valid] = self.class_colors[label_map[valid]]
         return out

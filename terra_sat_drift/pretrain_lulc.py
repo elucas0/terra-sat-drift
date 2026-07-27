@@ -44,7 +44,7 @@ def main():
     h5_labels_path = "/shared/projects/phisat2/data/processed/worldcover_all_clean_v1/worldcover_all_clean_labels_v1.h5"
     manifest_path = "/shared/projects/phisat2/data/processed/worldcover_all_clean_v1/worldcover_all_clean_manifest_v1.csv"
     
-    output_dir = Path(f"/shared/home/elucas/scratch/terra-sat-drift/outputs/{args.backbone}_pretrain_lulc")
+    output_dir = Path(f"/shared/home/elucas/scratch/terra-sat-drift/outputs/{args.backbone}_pretrain_s2b_lulc")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     datamodule = PhisatS2LULCDataModule(
@@ -100,7 +100,7 @@ def main():
         plot_on_val=True,
     )
 
-    logger = WandbLogger(project="encoder-lulc", name=f"pretrain_lulc_real_{args.backbone}")
+    logger = WandbLogger(project="encoder-lulc", name=f"pretrain_lulc_s2b_{args.backbone}")
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",

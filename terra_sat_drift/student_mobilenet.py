@@ -11,12 +11,34 @@ class UNetStudent(nn.Module):
         super().__init__()
         self.backbone = UNet(in_channels=in_channels, out_channels=out_channels)
         self.head = nn.Conv2d(out_channels, num_classes, kernel_size=1)
+        self.in_channels = in_channels
+        self.decoder_out_channels = out_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # UNet.forward returns decoder outputs from coarsest to finest resolution;
-        # the last entry is at the input's full resolution.
-        features = self.backbone(x)[-1]
-        return self.head(features)
+    def forward(self, x: torch.Tensor, return_features: bool = False):
+        """Predicts class logits, optionally alongside intermediate features.
+
+        Args:
+            x: (B, C, H, W) input.
+            return_features: when True, also return the representations the
+                contrastive objectives in ``model_tasks.losses`` operate on.
+
+        Returns:
+            The logit map (B, num_classes, H, W) by default. With
+            ``return_features=True``, a dict with keys:
+              ``logits``     (B, num_classes, H, W)
+              ``bottleneck`` (B, C_b, H/16, W/16) deepest encoder output, used
+                             for the instance-level cross-sensor contrast
+              ``decoder``    (B, out_channels, H, W) finest decoder output, used
+                             for the pixel-level prototype contrast
+        """
+        # UNet.forward returns decoder outputs from coarsest to finest resolution:
+        # index 0 is the encoder bottleneck, the last entry is at full resolution.
+        stages = self.backbone(x)
+        features = stages[-1]
+        logits = self.head(features)
+        if not return_features:
+            return logits
+        return {"logits": logits, "bottleneck": stages[0], "decoder": features}
 
 
 def create_student_model(

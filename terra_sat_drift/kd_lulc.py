@@ -15,8 +15,8 @@ from terratorch.models.encoder_decoder_factory import EncoderDecoderFactory
 # Import your custom modules
 from student_mobilenet import create_student_model
 from model_tasks.kd_module import KDSegmentationModule
-from dataset.datamodule_triplets_lulc import PhisatRealLULCDataModule
-from dataset.constants import WC_CLASS_MAPPING
+from dataset.datamodule_real_triplets_lulc import PhisatRealLULCDataModule
+from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES
 
 warnings.filterwarnings('ignore')
 
@@ -130,7 +130,10 @@ def main():
         ignore_index=-1,
         num_samples_to_log=args.num_samples_to_log,
         log_every_n_epochs=args.log_every_n_epochs,
-        class_names=list(WC_CLASS_MAPPING.keys()),
+        # WC_CLASS_MAPPING's *keys* are WorldCover codes, so passing them here
+        # produced metric keys like "IoU_10" and the ambiguous "IoU_100".
+        # WC_CLASS_NAMES is index-aligned with the mapping's values.
+        class_names=WC_CLASS_NAMES,
         rgb_band_indices=(2, 1, 0),
     )
 

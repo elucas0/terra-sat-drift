@@ -15,10 +15,10 @@ warnings.filterwarnings('ignore')
 import cv2
 import albumentations as A
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 from torch.utils.data import Dataset, DataLoader
 
 from .constants import WC_CLASS_MAPPING
+from .plot_utils import labels_to_rgb, legend_handles, stretch_rgb
 
 class PhisatS2LULCDataset(Dataset):
     """Dataset for pre-training on Sentinel-2 data with WorldCover labels."""
@@ -134,35 +134,18 @@ class PhisatS2LULCDataset(Dataset):
         if prediction is not None and prediction.ndim == 3:
             prediction = prediction[0]
 
-        # Normalize each channel individually to [0, 1] for visualization
-        for i in range(image.shape[0]):
-            c_min = image[i].min()
-            c_max = image[i].max()
-            if c_max > c_min:
-                image[i] = (image[i] - c_min) / (c_max - c_min)
-          
-        # Transpose to HWC for plotting      
-        image = np.transpose(image[[2, 1, 0]], (1, 2, 0))
         has_prediction = prediction is not None
         ncols = 3 if has_prediction else 2
         fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 5))
-        if ncols == 2:
-            axes = [axes[0], axes[1]]
 
-        class_items = sorted(WC_CLASS_MAPPING.items(), key=lambda item: item[1])
-        class_handles = [Patch(facecolor=plt.get_cmap("tab20")(idx / max(len(class_items) - 1, 1)), label=name)
-                         for name, idx in class_items]
-        if np.any(mask == -1):
-            class_handles = [Patch(facecolor="black", label="No label")] + class_handles
-
-        axes[0].imshow(image)
+        axes[0].imshow(stretch_rgb(image))  # Blue,Green,Red,... -> R,G,B
         axes[0].set_title("Image")
 
-        axes[1].imshow(mask, cmap="tab20", vmin=-1, vmax=max(WC_CLASS_MAPPING.values()))
+        axes[1].imshow(labels_to_rgb(mask))
         axes[1].set_title("Mask")
 
         if has_prediction:
-            axes[2].imshow(prediction, cmap="tab20", vmin=-1, vmax=max(WC_CLASS_MAPPING.values()))
+            axes[2].imshow(labels_to_rgb(prediction))
             axes[2].set_title("Prediction")
 
         for ax in axes:
@@ -172,11 +155,12 @@ class PhisatS2LULCDataset(Dataset):
         if suptitle:
             fig.suptitle(suptitle)
 
+        maps = [mask, prediction] if has_prediction else [mask]
         fig.legend(
-            handles=class_handles,
+            handles=legend_handles(*maps),
             loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            title="Class Names",
+            bbox_to_anchor=(0.84, 0.5),
+            title="Class names",
             frameon=True,
         )
 
