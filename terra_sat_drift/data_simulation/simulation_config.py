@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import json
-from .phisat2_constants import ProcessingLevels
+from phisat2_constants import ProcessingLevels
 
 @dataclass
 class SimulationSteps:

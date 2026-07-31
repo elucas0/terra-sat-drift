@@ -156,9 +156,12 @@ def simulate_hls_burn_scars(
         workers=1,
         save_logs=True,
         verbose=verbose,
+        # FireScarsNonGeo reads the Julian day straight from the filename (1-based),
+        # unlike most TerraTorch datasets which store `date.dayofyear - 1`.
+        day_of_year_base=1,
         logger=logger,
     )
-    
+
     config.save_json(output_dir / "simulation_config.json")
 
     # Log summary

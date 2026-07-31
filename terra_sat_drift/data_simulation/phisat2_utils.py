@@ -17,8 +17,8 @@ from cv2 import warpAffine
 from eolearn.features.utils import ResizeMethod, spatially_resize_image
 from eolearn.core import EOPatch, EOTask, FeatureType
 from eolearn.io import ExportToTiffTask
-from .simulation_config import SimulationConfig
-from .phisat2_constants import (
+from simulation_config import SimulationConfig
+from phisat2_constants import (
     BBOX_SIZE_CROPPED,
     CROP_SIZE,
     L1A_RAND_MEAN,
@@ -56,15 +56,24 @@ class AlternativePhisatCalculationTask(EOTask):
         l_ref: float,
         psf_feature: Tuple[FeatureType, str],
         psf_kernel: Dict[str, np.array],
+        apply_snr: bool = True,
+        apply_psf: bool = True,
     ):
         """Wapper task to simulate dummy SNR and PSF noise
+
+        The two stages are independent, so a single perturbation can be isolated.
+        When both run, PSF is applied on top of the SNR output; when only PSF runs,
+        it reads straight from ``input_feature``.
 
         :param input_feature: Input feature holding radiance values.
         :param snr_feature: Output feature with SNR simulated (dummy) values.
         :param psf_feature: Output feature with PSF simulated (dummy) values.
         :param snr_values: A list of SNR values range for Sentinel-2 bands ["B02", "B03", "B04", "PAN", "B08", "B05", "B06", "B07"].
         :param psf_kernel: A dictionary of PSF 7x7 kernels for PhiSat bands bands ["B1", "B2", "B3", "B0", "B7", "B4", "B5", "B6"].
-        :param l_ref: Spectral Radiance at Aperture (W/m^2/sr/um), a reference radiance used to generate the specific SNR
+        :param l_ref: Spectral Radiance at Aperture (W/m^2/sr/um), a reference radiance used to generate the specific SNR.
+            Currently unused: :meth:`add_snr` scales the noise by the scene maximum instead.
+        :param apply_snr: Whether to run the SNR stage. If False, ``snr_feature`` is never written.
+        :param apply_psf: Whether to run the PSF stage. If False, ``psf_feature`` is never written.
         """
         self.input_feature = input_feature
         self.snr_feature = snr_feature
@@ -72,21 +81,27 @@ class AlternativePhisatCalculationTask(EOTask):
         self.snr_values = snr_values
         self.psf_kernel = psf_kernel
         self.l_ref = l_ref
+        self.apply_snr = apply_snr
+        self.apply_psf = apply_psf
 
-    def add_psf(self, eopatch):
+    def add_psf(self, eopatch, input_feature: Optional[Tuple[FeatureType, str]] = None):
+        input_feature = input_feature if input_feature is not None else self.snr_feature
         bands_names = eopatch.meta_info.get("bands_names", S2_BANDS)
-        
-        # if there is a pan band in bands_names add use the same kernel as first band
-        if "PAN" in bands_names:
-            self.psf_kernel["PAN"] = self.psf_kernel.get(bands_names[0])
-        
+
+        # Bands inserted after the kernel dict was built (e.g. PAN) reuse the first
+        # band's kernel. Resolved per call rather than written back into
+        # self.psf_kernel, which is shared across executions.
+        def kernel_for(band_name: str) -> np.ndarray:
+            kernel = self.psf_kernel.get(band_name)
+            return kernel if kernel is not None else self.psf_kernel[bands_names[0]]
+
         convolved_data = np.concatenate(
             [
                 np.concatenate(
                     [
                         convolve(
                             _data[..., band],
-                            self.psf_kernel[kernel_band],
+                            kernel_for(kernel_band),
                             mode="mirror",
                         )[..., np.newaxis]
                         for band, kernel_band in enumerate(
@@ -95,23 +110,24 @@ class AlternativePhisatCalculationTask(EOTask):
                     ],
                     axis=-1,
                 )[np.newaxis, ...]
-                for _data in eopatch[self.snr_feature]
+                for _data in eopatch[input_feature]
             ],
             axis=0,
         )
         eopatch[self.psf_feature] = convolved_data
 
-    def add_snr(self, eopatch):
+    def add_snr(self, eopatch, input_feature: Optional[Tuple[FeatureType, str]] = None):
+        input_feature = input_feature if input_feature is not None else self.input_feature
         rng = np.random.default_rng() # Initialize local RNG
-        
+
         bands_names = eopatch.meta_info.get("bands_names", S2_BANDS)
-        
+
         # Use rng.integers instead of np.random.randint
         base_snr = rng.integers(self.snr_values[0], self.snr_values[1])
         snr_bands_values = {band: base_snr for band in bands_names}
-        
-        radiances = eopatch[self.input_feature]
-        
+
+        radiances = eopatch[input_feature]
+
         # Use rng.normal instead of np.random.normal
         random_noise = rng.normal(size=radiances.shape)
 
@@ -132,8 +148,14 @@ class AlternativePhisatCalculationTask(EOTask):
         eopatch[self.snr_feature] = noisy_radiances
         
     def execute(self, eopatch: EOPatch) -> EOPatch:
-        self.add_snr(eopatch)
-        self.add_psf(eopatch)
+        source_feature = self.input_feature
+
+        if self.apply_snr:
+            self.add_snr(eopatch, source_feature)
+            source_feature = self.snr_feature
+
+        if self.apply_psf:
+            self.add_psf(eopatch, source_feature)
 
         return eopatch
 
@@ -947,43 +969,49 @@ class ResamplingTask(EOTask):
         if "sunZenithAngles" in eopatch.data:
             features_to_resize[FeatureType.DATA].append("sunZenithAngles")
 
-        # if mask is present, we need to resize it as well
-        if "MASK" in eopatch.data:
-            resampled_list = []
-            mask = eopatch.data["MASK"]
-            for t in range(mask.shape[0]):
-                resampled_mask = spatially_resize_image(
-                    mask[t],
-                    new_size=new_size_cv2,
-                    resize_method=ResizeMethod.NEAREST,
-                ).astype(np.float32)
-                resampled_list.append(resampled_mask)
-            
-            eopatch[FeatureType.MASK, f"MASK_RES"] = np.array(resampled_list)
-
         s2_data_shape = eopatch.data[self.pan_feature].shape
+        # spatially_resize_image expects new_size as (height, width)
         new_size = (
             int((s2_data_shape[1] * eopatch.meta_info["source_resolution"]) / PHISAT2_RESOLUTION),
             int((s2_data_shape[2] * eopatch.meta_info["source_resolution"]) / PHISAT2_RESOLUTION),
         )
-        
-        new_size_cv2 = (new_size[0], new_size[1]) # cv2 uses (width, height)
 
         for feat_name in features_to_resize[FeatureType.DATA]:
             data = eopatch[FeatureType.DATA, feat_name]
-            
+
             resampled_list = []
             for t in range(data.shape[0]):
                 resampled_img = spatially_resize_image(
                     data[t],
-                    new_size=new_size_cv2,
+                    new_size=new_size,
                     resize_method=ResizeMethod.NEAREST,
                 ).astype(np.float32)
                 if resampled_img.ndim == 2:
                     resampled_img = resampled_img[..., np.newaxis].astype(np.float32)
                 resampled_list.append(resampled_img)
-            
+
             eopatch[FeatureType.DATA, f"{feat_name}_RES"] = np.array(resampled_list)
+
+        # Resize the label mask onto the same grid. It lives under FeatureType.MASK,
+        # and its dtype is preserved so label values stay exact.
+        if "MASK" in eopatch.mask:
+            mask = eopatch[FeatureType.MASK, "MASK"]
+            # cv2 cannot resize int64 without a lossy downcast; int32 holds any label id
+            if mask.dtype == np.int64:
+                mask = mask.astype(np.int32)
+
+            resampled_list = []
+            for t in range(mask.shape[0]):
+                resampled_mask = spatially_resize_image(
+                    mask[t],
+                    new_size=new_size,
+                    resize_method=ResizeMethod.NEAREST,
+                )
+                if resampled_mask.ndim == 2:
+                    resampled_mask = resampled_mask[..., np.newaxis]
+                resampled_list.append(resampled_mask)
+
+            eopatch[FeatureType.MASK, "MASK_RES"] = np.array(resampled_list)
 
         return eopatch
 
@@ -1040,7 +1068,6 @@ class FetchMetadataTask(EOTask):
         
         start_date = eopatch.timestamps[0].strftime("%Y-%m-%d")
         end_date = eopatch.timestamps[-1].strftime("%Y-%m-%d")
-        print(f"Fetching metadata for area: {area}, start_date: {start_date}, end_date: {end_date}")
         prod_type = "S2MSI2A"
 
         # Build OData query for Copernicus catalogue
@@ -1109,7 +1136,6 @@ class FetchMetadataTask(EOTask):
                 "No products found in Copernicus catalogue for the given area and time range, using default metadata values."
             )
         else:
-            print(f"Found {len(products_list)} products in Copernicus catalogue for the given area and time range.")
             # Extract metadata from each product
             for tile_idx, (tile, timestamp) in enumerate(zip(products_list, eopatch.timestamps)):
                 metadata = self._fetch_metadata_from_copernicus(tile)
@@ -1163,7 +1189,6 @@ class FetchMetadataTask(EOTask):
             raise FileNotFoundError(
                 f"SAFE product not found at {local_safe_path} for product {product_id}"
             )
-        print(f"Metadata file found for product {product_id} at {local_safe_path}")
         # Construct the metadata file path
         metadata_file = os.path.join(local_safe_path, "MTD_MSIL2A.xml")
         if not os.path.exists(metadata_file):

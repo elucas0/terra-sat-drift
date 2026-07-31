@@ -95,6 +95,7 @@ from .losses.contrastive import (
     nt_xent_cross_domain,
     rbf_mmd2,
 )
+from .losses.segmentation import focal_ce_loss
 
 # Domain branch ids used for DSBN routing.
 SOURCE_DOMAIN_ID = 0  # Sentinel-2, the teacher's home domain
@@ -170,6 +171,10 @@ class CrossSensorKDModule(pl.LightningModule):
         w_instance: float = 0.5,
         w_pixel: float = 0.1,
         w_crd: float = 0.0,
+        # --- task loss ------------------------------------------------------
+        task_loss: str = "ce",
+        focal_gamma: float = 2.0,
+        class_weights: Optional[Sequence[float]] = None,
         # --- distillation -------------------------------------------------
         kd_mode: str = "kl",
         kd_temperature: float = 4.0,
@@ -219,6 +224,24 @@ class CrossSensorKDModule(pl.LightningModule):
 
         self.kd_mode = kd_mode
         self.kd_temperature = kd_temperature
+        if task_loss not in ("ce", "focal"):
+            raise ValueError(f"task_loss must be 'ce' or 'focal', got {task_loss!r}")
+        self.task_loss = task_loss
+        self.focal_gamma = focal_gamma
+        # Registered as a buffer so it follows the module across devices and is
+        # captured in the checkpoint -- reloading a run must not silently revert
+        # to unweighted loss. Empty tensor means "no weighting".
+        self.register_buffer(
+            "class_weight",
+            torch.as_tensor(list(class_weights), dtype=torch.float32)
+            if class_weights is not None else torch.empty(0),
+            persistent=True,
+        )
+        if self.class_weight.numel() and self.class_weight.numel() != num_classes:
+            raise ValueError(
+                f"class_weights has {self.class_weight.numel()} entries, "
+                f"expected num_classes={num_classes}"
+            )
         self.kd_on_unlabeled = kd_on_unlabeled
         self.distill_source_branch = distill_source_branch
 
@@ -283,11 +306,22 @@ class CrossSensorKDModule(pl.LightningModule):
                 self.metrics[f"{stage}_{who}_f1"] = MulticlassF1Score(
                     num_classes=num_classes, ignore_index=ignore_index, average="macro"
                 )
+            # Logged under a "<stage>_per_class/" section of their own rather than
+            # mixed into "<stage>/". All 11 classes were always being logged, but
+            # buried among the ~30 other keys in the same section they are easy to
+            # miss in the W&B workspace, which only auto-renders a limited number
+            # of panels per section.
             self.metrics[f"{stage}_student_target_iou_per_class"] = ClasswiseWrapper(
                 MulticlassJaccardIndex(num_classes=num_classes, ignore_index=ignore_index, average=None),
                 labels=self.class_names,
-                prefix=f"{stage}/student_target_IoU_",
+                prefix=f"{stage}_per_class/IoU_",
             )
+            # Per-class pixel counts. torchmetrics reports IoU 0.0 both for "the
+            # model got this class entirely wrong" and for "this class did not
+            # occur", which are very different things for the rare classes here
+            # (moss/lichen, mangroves and snow are each well under 1% of pixels).
+            # The support tells the two apart.
+            self.register_buffer(f"_support_{stage}", torch.zeros(num_classes), persistent=False)
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -412,6 +446,19 @@ class CrossSensorKDModule(pl.LightningModule):
             return 1.0
         return float(min(1.0, (self.current_epoch + 1) / (self.contrastive_warmup_epochs + 1)))
 
+    def _task_loss(self, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Supervised segmentation loss, cross-entropy or focal.
+
+        `focal_ce_loss` with gamma=0 is exactly weighted cross-entropy, so both
+        settings share one code path and `class_weights` applies either way.
+        """
+        alpha = self.class_weight if self.class_weight.numel() else None
+        return focal_ce_loss(
+            logits, mask,
+            gamma=self.focal_gamma if self.task_loss == "focal" else 0.0,
+            alpha=alpha, ignore_index=self.ignore_index,
+        )
+
     # ------------------------------------------------------------------
     # Shared step
     # ------------------------------------------------------------------
@@ -434,12 +481,8 @@ class CrossSensorKDModule(pl.LightningModule):
         zero = logits_t.sum() * 0.0
 
         # --- task loss ---------------------------------------------------
-        l_task_t = F.cross_entropy(logits_t, mask, ignore_index=self.ignore_index)
-        l_task_s = (
-            F.cross_entropy(logits_s, mask, ignore_index=self.ignore_index)
-            if self.w_task_source > 0
-            else zero
-        )
+        l_task_t = self._task_loss(logits_t, mask)
+        l_task_s = self._task_loss(logits_s, mask) if self.w_task_source > 0 else zero
         losses["task_target"] = l_task_t
         losses["task_source"] = l_task_s
 
@@ -534,6 +577,10 @@ class CrossSensorKDModule(pl.LightningModule):
             "pred_target": logits_t.argmax(dim=1),
             "pred_source": logits_s.argmax(dim=1),
             "pred_teacher": teacher_logits.argmax(dim=1),
+            # Carried through so the qualitative plot can name the patches it
+            # drew; makes it possible to check that the selection really varies
+            # and to go back to a specific patch in the dataset.
+            "patch_index": batch.get("patch_index"),
         }
 
     # ------------------------------------------------------------------
@@ -551,6 +598,12 @@ class CrossSensorKDModule(pl.LightningModule):
                 self.metrics[key](logits, mask)
                 self.log(f"{prefix}/{who}_{metric}", self.metrics[key], on_step=False, on_epoch=True)
         self.metrics[f"{prefix}_student_target_iou_per_class"].update(logits_t, mask)
+
+        with torch.no_grad():
+            valid = mask[mask != self.ignore_index]
+            if valid.numel():
+                buf = getattr(self, f"_support_{prefix}")
+                buf += torch.bincount(valid.flatten(), minlength=self.num_classes).to(buf.dtype)
 
     def _log_domain_gap(self, prefix: str, z_t: torch.Tensor, z_s: torch.Tensor) -> None:
         """Reports how sensor-invariant the latent space actually is.
@@ -600,6 +653,14 @@ class CrossSensorKDModule(pl.LightningModule):
         self.log_dict(metric.compute(), sync_dist=True)
         metric.reset()
 
+        support = getattr(self, f"_support_{prefix}")
+        names = self.class_names or [str(i) for i in range(self.num_classes)]
+        self.log_dict(
+            {f"{prefix}_per_class/pixels_{n}": support[i] for i, n in enumerate(names)},
+            reduce_fx="sum", sync_dist=True,
+        )
+        support.zero_()
+
         # The headline domain-invariance number: how much worse the student is
         # on PhiSat-2 than on the Sentinel-2 view of the very same patches.
         # Any residual value is domain gap that survived training.
@@ -613,10 +674,30 @@ class CrossSensorKDModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, batch_idx, prefix="train")["loss"]
 
+    def on_validation_epoch_start(self) -> None:
+        self._plot_batch_idx = self._pick_plot_batch()
+
+    def _pick_plot_batch(self) -> int:
+        """Chooses which validation batch to render this epoch.
+
+        This used to be hardcoded to batch 0, and the validation loader is not
+        shuffled, so every epoch logged the identical handful of patches. The
+        choice is seeded by the epoch number so it still varies from epoch to
+        epoch while staying reproducible across runs and identical on every rank
+        (important under DDP, where all ranks must agree on which batch is the
+        one being plotted).
+        """
+        n = getattr(self.trainer, "num_val_batches", None) if self.trainer else None
+        if isinstance(n, (list, tuple)):
+            n = n[0] if n else 0
+        if not isinstance(n, int) or n <= 0:  # unknown / inf (IterableDataset)
+            return 0
+        return int(np.random.default_rng(self.current_epoch).integers(0, n))
+
     def validation_step(self, batch, batch_idx):
         out = self._shared_step(batch, batch_idx, prefix="val")
         should_plot = (
-            batch_idx == 0
+            batch_idx == getattr(self, "_plot_batch_idx", 0)
             and self.trainer is not None
             and self.trainer.is_global_zero
             and self.current_epoch % self.log_every_n_epochs == 0
@@ -691,7 +772,12 @@ class CrossSensorKDModule(pl.LightningModule):
         if self.logger is None:
             return
 
-        n = min(self.num_samples_to_log, out["image_target"].shape[0])
+        batch_size = out["image_target"].shape[0]
+        n = min(self.num_samples_to_log, batch_size)
+        # Random rows rather than the first n, so a large batch does not always
+        # surface the same corner of it. Seeded by epoch, as in _pick_plot_batch.
+        rows = np.random.default_rng(self.current_epoch + 1).choice(
+            batch_size, size=n, replace=False)
         cols = [
             ("PhiSat-2", lambda i: self._to_rgb(out["image_target"][i])),
             ("Sentinel-2", lambda i: self._to_rgb(out["image_source"][i])),
@@ -702,13 +788,20 @@ class CrossSensorKDModule(pl.LightningModule):
         ]
 
         fig, axes = plt.subplots(n, len(cols), figsize=(2.6 * len(cols), 2.6 * n), squeeze=False)
-        for row in range(n):
+        for row, sample_idx in enumerate(rows):
             for col, (title, render) in enumerate(cols):
                 ax = axes[row][col]
-                ax.imshow(render(row))
+                ax.imshow(render(int(sample_idx)))
                 if row == 0:
                     ax.set_title(title, fontsize=9)
                 ax.axis("off")
+            # Drawn as an overlay rather than a ylabel, which `axis("off")` hides.
+            if out.get("patch_index") is not None:
+                axes[row][0].text(
+                    0.02, 0.98, f"#{int(out['patch_index'][sample_idx])}",
+                    transform=axes[row][0].transAxes, va="top", fontsize=6,
+                    color="white", bbox=dict(facecolor="black", alpha=0.5,
+                                             edgecolor="none", pad=1.5))
         fig.suptitle(f"{split} — epoch {self.current_epoch}")
         fig.tight_layout()
         self._log_figure(fig, key=f"{split}/predictions")

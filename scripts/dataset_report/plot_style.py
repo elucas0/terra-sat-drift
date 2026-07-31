@@ -29,6 +29,23 @@ SENSOR_COLOR = {
 }
 SENSOR_LABEL = {"real": "PhiSat-2 (real)", "s2b": "Sentinel-2B", "sim": "PhiSat-2 (simulated)"}
 
+# Full 8-slot categorical order, for line and bar charts comparing several runs.
+# This fixed order is the colour-vision-safety mechanism, not cosmetic: it clears
+# the adjacent-pair separation gates (lines, bars, stacks) in that sequence. It
+# does NOT clear the all-pairs gates that scatter and small-multiple forms need
+# -- for those use only the first three slots, as SENSOR_COLOR does. Never extend
+# past slot 8 with a generated hue: fold extra series into "other" or facet.
+CATEGORICAL = [
+    "#2a78d6",  # 1 blue
+    "#eb6834",  # 2 orange
+    "#1baf7a",  # 3 aqua
+    "#eda100",  # 4 yellow
+    "#e87ba4",  # 5 magenta
+    "#008300",  # 6 green
+    "#4a3aa7",  # 7 violet
+    "#e34948",  # 8 red
+]
+
 # --- magnitude: one hue, light to dark -------------------------------------
 SEQ = LinearSegmentedColormap.from_list("seq_blue", ["#eef4fb", "#2a78d6", "#10315a"])
 

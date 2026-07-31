@@ -66,3 +66,22 @@ WC_CLASS_COLORS = [
 
 # Colour for the ignore_index (-1) pixels written by the class remapping.
 NO_LABEL_COLOR = "#000000"
+
+# Share of labelled pixels per class (%), index-aligned, measured over all
+# 253,228 patches of the clean WorldCover manifest by
+# scripts/dataset_report/analyze_manifest.py. Used to derive class weights for
+# the imbalanced-segmentation losses. The tail matters: the last three classes
+# together are ~1.2% of pixels but 27% of a macro-averaged mIoU.
+WC_CLASS_PIXEL_FREQ = [
+    19.995,  # 0  tree cover
+    6.006,   # 1  shrubland
+    20.777,  # 2  grassland
+    13.422,  # 3  cropland
+    14.400,  # 4  built-up
+    16.196,  # 5  bare / sparse vegetation
+    0.497,   # 6  snow and ice
+    6.233,   # 7  permanent water
+    1.423,   # 8  herbaceous wetland
+    0.521,   # 9  mangroves
+    0.331,   # 10 moss and lichen
+]

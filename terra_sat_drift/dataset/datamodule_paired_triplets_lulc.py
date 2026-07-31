@@ -42,7 +42,8 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
         val_transform: A.Compose | None = None,
         max_samples: Optional[int] = None,
         target_domain: str = "real",
-        source_domain: str = "s2b",
+        source_domain: Optional[str] = "s2b",
+        augment: bool = True,
     ):
         super().__init__()
         self.h5_images_path = h5_images_path
@@ -50,8 +51,11 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
         self.manifest_path = manifest_path
         self.batch_size = batch_size
         self.num_workers = num_workers
+        # `augment=False` yields no train-time transform at all; an explicit
+        # `train_transform` still wins over both.
         self.train_transform = (
-            build_paired_transform(train=True) if train_transform is None else train_transform
+            train_transform if train_transform is not None
+            else (build_paired_transform(train=True) if augment else None)
         )
         self.val_transform = val_transform
         self.max_samples = max_samples

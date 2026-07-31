@@ -4,27 +4,34 @@
 \section{Practical Implementation}
 \label{sec:practical-implementation}
 
-Two TerraMind variants, Tiny and Base, were fully fine-tuned on the real-$\Phi$-sat-2 branch of the triplet dataset (Section~\ref{sec:triplets}) for the LULC task, following the per-domain normalization protocol of Section~\ref{sec:normalization}: square-root transform, smooth clip to a domain-specific value, and $z$-score standardization using statistics computed separately for each sensor domain. An initial evaluation pass understated performance because of a normalization defect causing weight saturation; all numbers reported below are post-correction. The simulated degraded Sen1Floods ladder (Section~\ref{sec:sen1floods-sim}) was built at the flight-calibrated baseline degradation level and at an extended, beyond-nominal sweep, using the pipeline of Section~\ref{sec:degradation-pipeline}, and TerraMind was fine-tuned and evaluated on each rung of that ladder independently. Domain-gap diagnostics (MMD, t-SNE, per-layer cosine similarity) were computed on frozen TerraMind embeddings extracted from the co-registered triplets, under both shared and per-domain normalization, to rule out normalization artifacts as an explanation for the measured gap (Section~\ref{sec:normalization}).
+Two TerraMind variants, Tiny and Base, were fully fine-tuned on the real-$\Phi$-sat-2 branch of the triplet dataset (Section~\ref{sec:triplets}) for the LULC task, following the per-domain normalization protocol of Section~\ref{sec:normalization}: square-root transform, smooth clip to a domain-specific value, and $z$-score standardization using statistics computed separately for each sensor domain.
+An initial evaluation pass understated performance because of a normalization defect causing weight saturation; all numbers reported below are post-correction.
+The simulated degraded Sen1Floods ladder (Section~\ref{sec:sen1floods-sim}) was built at the flight-calibrated baseline degradation level and at an extended, beyond-nominal sweep, using the pipeline of Section~\ref{sec:degradation-pipeline}, and TerraMind was fine-tuned and evaluated on each rung of that ladder independently.
+Domain-gap diagnostics (MMD, t-SNE, per-layer cosine similarity) were computed on frozen TerraMind embeddings extracted from the co-registered triplets, under both shared and per-domain normalization, to rule out normalization artifacts as an explanation for the measured gap (Section~\ref{sec:normalization}).
 
 \section{Domain Gap in Latent Space (RQ1)}
 \label{sec:rq1-results}
 
 \subsection{Real-data LULC baseline}
 
-TerraMind fine-tuned directly on real $\Phi$-sat-2 LULC data achieves mIoU 0.47 (Tiny) and 0.51 (Base) on the held-out real test set -- a solid result given the scarcity of real, labeled $\Phi$-sat-2 data, and one obtained without any explicit domain-adaptation mechanism, since the model here is trained and evaluated on the same (real) sensor domain. This result establishes that the underlying task is learnable at this label budget and is not itself the bottleneck; the domain-gap question only arises when this same encoder is asked to transfer from Sentinel-2 alone.
+TerraMind fine-tuned directly on real $\Phi$-sat-2 LULC data achieves mIoU 0.47 (Tiny) and 0.51 (Base) on the held-out real test set -- a solid result given the scarcity of real, labeled $\Phi$-sat-2 data, and one obtained without any explicit domain-adaptation mechanism, since the model here is trained and evaluated on the same (real) sensor domain.
+This result establishes that the underlying task is learnable at this label budget and is not itself the bottleneck; the domain-gap question only arises when this same encoder is asked to transfer from Sentinel-2 alone.
 
 \begin{quote}
-\textbf{[TBD -- experiment pending]} A Sentinel-2-only fine-tuned baseline, evaluated zero-shot on real $\Phi$-sat-2 LULC data, is required to complete the source-vs-target comparison in the framing used by related on-orbit GeoFM studies (Section~\ref{chap:background}), and to quantify the ``before adaptation'' gap that the contrastive-KD mechanism (Section~\ref{sec:rq3-results}) is evaluated against.
+    \textbf{[TBD -- experiment pending]}
+    A Sentinel-2-only fine-tuned baseline, evaluated zero-shot on real $\Phi$-sat-2 LULC data, is required to complete the source-vs-target comparison in the framing used by related on-orbit GeoFM studies (Section~\ref{chap:background}), and to quantify the ``before adaptation'' gap that the contrastive-KD mechanism (Section~\ref{sec:rq3-results}) is evaluated against.
 \end{quote}
 
-\subsection{Where the gap concentrates}
+\subsection{Domain-gap diagnostics at the encoder level}
 
-Domain-gap diagnostics on the co-registered triplets show that the gap is not uniform across TerraMind's depth: cosine similarity between matched real-$\Phi$-sat-2 and Sentinel-2 embeddings is lowest in the encoder's early layers, and per-domain normalization sharpens rather than dissolves this early-layer separation relative to a shared-normalization baseline. Since a normalization artifact would be expected to shrink, not sharpen, apparent similarity once each domain is properly calibrated to its own statistics, this result rules out calibration mismatch as the source of the measured gap and indicates a genuine representational effect concentrated in the earliest stages of the encoder, plausibly reflecting low-level spectral and textural statistics that later, more semantic layers partially normalize away.
+Domain-gap diagnostics on the co-registered triplets show that the gap is not uniform across TerraMind's depth: cosine similarity between matched real-$\Phi$-sat-2 and Sentinel-2 embeddings is lowest in the encoder's early layers, and per-domain normalization sharpens rather than dissolves this early-layer separation relative to a shared-normalization baseline.
+Since a normalization artifact would be expected to shrink, not sharpen, apparent similarity once each domain is properly calibrated to its own statistics, this result rules out calibration mismatch as the source of the measured gap and indicates a genuine representational effect concentrated in the earliest stages of the encoder, plausibly reflecting low-level spectral and textural statistics that later, more semantic layers partially normalize away.
 
 Histogram comparison of the two sensor domains points to differing spectral response functions between $\Phi$-sat-2 and Sentinel-2, rather than the spatial-resolution mismatch emphasized in related on-orbit GeoFM work (Section~\ref{chap:background}), as the likely dominant driver -- notable because $\Phi$-sat-2's ground sampling distance (4.75\,m) is finer than Sentinel-2's (10--20\,m), the reverse of the coarser-target case that motivates a resolution-centric account of domain gap elsewhere.
 
 \begin{quote}
-\textbf{[TBD -- experiment pending]} A controlled ablation isolating the individual contribution of spectral-response mismatch, band misalignment, signal-to-noise ratio, and optical blur to the measured gap has not yet been run; the spectral-response hypothesis above is drawn from histogram inspection, not from an ablation, and should be read as a working hypothesis pending that experiment.
+    \textbf{[TBD -- experiment pending]}
+    A controlled ablation isolating the individual contribution of spectral-response mismatch, band misalignment, signal-to-noise ratio, and optical blur to the measured gap has not yet been run; the spectral-response hypothesis above is drawn from histogram inspection, not from an ablation, and should be read as a working hypothesis pending that experiment.
 \end{quote}
 
 \section{Domain Adaptation and Distillation (RQ2, RQ3)}
@@ -32,38 +39,59 @@ Histogram comparison of the two sensor domains points to differing spectral resp
 
 \subsection{A negative result that reshaped the approach}
 
-Cross-validating against the real triplets shows that TerraMind fine-tuned on the physics-degraded Sen1Floods ladder, using standard supervised fine-tuning alone, does not reduce the domain gap to real $\Phi$-sat-2 relative to a model fine-tuned only on clean Sentinel-2 -- even at the flight-calibrated degradation level, and even acknowledging that this comparison is partly confounded by task mismatch (Sen1Floods vs.\ the LULC task the triplets are labeled for). Standard fine-tuning on degraded examples applies no explicit pressure toward a sensor-invariant representation, and none emerges incidentally. This result, rather than a setback, is what motivated the paired-contrastive mechanism of Section~\ref{sec:contrastive-mechanism}, applied directly to the student during cross-architecture distillation rather than as encoder-level fine-tuning.
+Cross-validating against the real triplets shows that TerraMind fine-tuned on the physics-degraded Sen1Floods ladder, using standard supervised fine-tuning alone, does not reduce the domain gap to real $\Phi$-sat-2 relative to a model fine-tuned only on clean Sentinel-2 -- even at the flight-calibrated degradation level, and even acknowledging that this comparison is partly confounded by task mismatch (Sen1Floods vs.
+\ the LULC task the triplets are labeled for).
+Standard fine-tuning on degraded examples applies no explicit pressure toward a sensor-invariant representation, and none emerges incidentally.
+This result, rather than a setback, is what motivated the paired-contrastive mechanism of Section~\ref{sec:contrastive-mechanism}, applied directly to the student during cross-architecture distillation rather than as encoder-level fine-tuning.
 
 \begin{quote}
-\textbf{[TBD -- experiment pending]} Results for the adopted mechanism itself -- the contrastive-KD-distilled CNN student's LULC performance against the Sentinel-2-only baseline and against a student distilled with the standard response/logit-only objective alone -- are the headline result this thesis is structured around (Section~\ref{sec:practical-implementation}), and are pending completion of the corresponding training runs. The logit-only distillation baseline has been run and judged qualitatively insufficient, consistent with the negative fine-tuning result above, but its numeric comparison against the contrastive-KD result is not yet available.
+    \textbf{[TBD -- experiment pending]}
+    Results for the adopted mechanism itself -- the contrastive-KD-distilled CNN student's LULC performance against the Sentinel-2-only baseline and against a student distilled with the standard response/logit-only objective alone -- are the headline result this thesis is structured around (Section~\ref{sec:practical-implementation}), and are pending completion of the corresponding training runs.
+    The logit-only distillation baseline has been run and judged qualitatively insufficient, consistent with the negative fine-tuning result above, but its numeric comparison against the contrastive-KD result is not yet available.
 \end{quote}
 
 \subsection{Robustness across the degradation ladder}
 
-Flood-segmentation IoU on the simulated Sen1Floods ladder degrades only mildly across the full range of simulated degradation severity, from 0.71 on the clean scene to 0.67 at the highest degradation level tested (including the lowest simulated signal-to-noise condition). This is a smaller effect than the LULC domain-gap results above might suggest, and is discussed further in Section~\ref{sec:discussion-comparison}.
+Flood-segmentation IoU on the simulated Sen1Floods ladder degrades only mildly across the full range of simulated degradation severity, from 0.71 on the clean scene to 0.67 at the highest degradation level tested (including the lowest simulated signal-to-noise condition).
+This is a smaller effect than the LULC domain-gap results above might suggest, and is discussed further in Section~\ref{sec:discussion-comparison}.
 
 \section{Discussion}
 \label{sec:discussion}
 
-\subsection{Interpreting the flood-robustness result}
+\subsection{Interpretation of the flood-robustness result}
 \label{sec:discussion-comparison}
 
-The mild flood-IoU degradation reported above is not unique to this thesis: Du et al.\ \cite{du2025onorbitdemonstrationgeospatialfoundation} independently report that flood detection was anomalously robust to the sensor domain gap on Kanyini, in contrast to a substantial (approximately 47\%) drop in cloud-detection performance on the same platform. Two independent studies observing the same pattern is worth foregrounding rather than treating as incidental: water's spectral signature (strong near-infrared absorption contrast) plausibly survives sensor noise and band mismatch better than the texture- and boundary-dependent cues that cloud or general land-cover classification rely on. This has a direct consequence for how this thesis's motivating narrative should be read: flood segmentation, the downstream task chosen here, may understate the severity of the domain-gap problem this thesis's method addresses, since it happens to be an unusually forgiving task. This is stated here as an acknowledged limitation of the choice of downstream task, not concealed as a favorable result.
+The mild flood-IoU degradation reported above is not unique to this thesis: Du et al.
+\ \cite{du2025onorbitdemonstrationgeospatialfoundation} independently report that flood detection was anomalously robust to the sensor domain gap on Kanyini, in contrast to a substantial (approximately 47\%) drop in cloud-detection performance on the same platform.
+Two independent studies observing the same pattern is worth foregrounding rather than treating as incidental: water's spectral signature (strong near-infrared absorption contrast) plausibly survives sensor noise and band mismatch better than the texture- and boundary-dependent cues that cloud or general land-cover classification rely on.
+This has a direct consequence for how this thesis's motivating narrative should be read: flood segmentation, the downstream task chosen here, may understate the severity of the domain-gap problem this thesis's method addresses, since it happens to be an unusually forgiving task.
+This is stated here as an acknowledged limitation of the choice of downstream task, not concealed as a favorable result.
 
-\subsection{Positioning against $\Phi$satNet}
+\subsection{Positioning with $\Phi$satNet}
 
-$\Phi$satNet (Section~\ref{sec:phisatnet-background}), developed within the same research group, reports that a purpose-built, non-transformer GeoFM trained from scratch on a mission-specific corpus matches or exceeds unconstrained transformer-based GeoFMs on several on-board tasks. Taken at face value, this raises a reasonable objection to the approach in this thesis: if a bespoke lightweight model already performs well without any of the domain-adaptation or distillation machinery developed here, what is gained by adapting TerraMind instead? This thesis's answer is a label-efficiency bet, not a raw-performance claim: TerraMind's large-scale, diverse, multi-modal pre-training is expected to generalize to new $\Phi$-sat-2 downstream tasks with fewer labels than $\Phi$satNet's narrower, curated pre-training task suite requires. The intended test of this bet -- a matched few-shot comparison against $\Phi$satNet on a shared task and label budget -- is not yet run.
+$\Phi$satNet (Section~\ref{sec:phisatnet-background}), developed within the same research group, reports that a purpose-built, non-transformer GeoFM trained from scratch on a mission-specific corpus matches or exceeds unconstrained transformer-based GeoFMs on several on-board tasks.
+Taken at face value, this raises a reasonable objection to the approach in this thesis: if a bespoke lightweight model already performs well without any of the domain-adaptation or distillation machinery developed here, what is gained by adapting TerraMind instead?
+This thesis's answer is a label-efficiency bet, not a raw-performance claim: TerraMind's large-scale, diverse, multi-modal pre-training is expected to generalize to new $\Phi$-sat-2 downstream tasks with fewer labels than $\Phi$satNet's narrower, curated pre-training task suite requires.
+The intended test of this bet -- a matched few-shot comparison against $\Phi$satNet on a shared task and label budget -- is not yet run.
 
 \begin{quote}
-\textbf{[TBD -- experiment pending]} Few-shot comparison against $\Phi$satNet (or its published OnboardEO-Bench numbers, where a matched task and label budget exists) is planned but not yet executed.
+    \textbf{[TBD -- experiment pending]}
+    Few-shot comparison against $\Phi$satNet (or its published OnboardEO-Bench numbers, where a matched task and label budget exists) is planned but not yet executed.
 \end{quote}
 
-Critically, this thesis's central methodological claim does not depend on the outcome of that comparison. The contribution under test is the paired-contrastive, co-registration-exploiting distillation mechanism itself (Section~\ref{sec:contrastive-mechanism}) -- a general technique for closing sensor domain gap during cross-architecture compression -- which remains valid and useful regardless of whether TerraMind ultimately proves more or less label-efficient than a bespoke model such as $\Phi$satNet on this specific mission. The backbone-choice question and the method-validity question are deliberately kept separable.
+Critically, this thesis's central methodological claim does not depend on the outcome of that comparison.
+The contribution under test is the paired-contrastive, co-registration-exploiting distillation mechanism itself (Section~\ref{sec:contrastive-mechanism}) -- a general technique for closing sensor domain gap during cross-architecture compression -- which remains valid and useful regardless of whether TerraMind ultimately proves more or less label-efficient than a bespoke model such as $\Phi$satNet on this specific mission.
+The backbone-choice question and the method-validity question are deliberately kept separable.
 
 \subsection{Limitations}
 
-This work is scoped to a single mission and sensor pair ($\Phi$-sat-2 and Sentinel-2); no comparison to other on-board missions or sensor combinations is attempted, so the generality of the specific spectral-response-driven gap finding (Section~\ref{sec:rq1-results}) beyond this pair is untested. The thesis also relies on TerraMind as a given, externally pre-trained GeoFM rather than training a custom foundation model, which is a deliberate scope decision (Section~\ref{sec:research-objective}) but means the label-efficiency bet in Section~\ref{sec:discussion-comparison} is tested for one specific large GeoFM, not for the class of large GeoFMs in general. The flood-segmentation downstream task, as discussed above, may understate rather than represent the severity of the domain-gap problem for other applications.
+This work is scoped to a single mission and sensor pair ($\Phi$-sat-2 and Sentinel-2); no comparison to other on-board missions or sensor combinations is attempted, so the generality of the specific spectral-response-driven gap finding (Section~\ref{sec:rq1-results}) beyond this pair is untested.
+The thesis also relies on TerraMind as a given, externally pre-trained GeoFM rather than training a custom foundation model, which is a deliberate scope decision (Section~\ref{sec:research-objective}) but means the label-efficiency bet in Section~\ref{sec:discussion-comparison} is tested for one specific large GeoFM, not for the class of large GeoFMs in general.
+The flood-segmentation downstream task, as discussed above, may understate rather than represent the severity of the domain-gap problem for other applications.
 
 \subsection{Practical recommendations}
 
-Two recommendations follow directly from this work. First, missions intended to host on-board GeoFMs should prioritize collecting co-registered calibration data -- across the sensor pair the mission actually needs to bridge -- early in the mission's operational life, rather than waiting for labeled real-world event data to accumulate; this is precisely what made the domain-gap measurement in this thesis possible at all. Second, physics-based degradation simulation should be treated as a necessary complement to real paired data, not a substitute for it: the negative fine-tuning result (Section~\ref{sec:rq3-results}) shows that simulated data alone, however well calibrated, does not automatically confer robustness. Concrete directions for narrowing the remaining simulation-to-real gap include histogram matching of simulated output against real target-sensor statistics, and calibrating the simulator against known ground-truth structures visible in both sensors.
+Two recommendations follow directly from this work.
+First, missions intended to host on-board GeoFMs should prioritize collecting co-registered calibration data -- across the sensor pair the mission actually needs to bridge -- early in the mission's operational life, rather than waiting for labeled real-world event data to accumulate; this is precisely what made the domain-gap measurement in this thesis possible at all.
+Second, physics-based degradation simulation should be treated as a necessary complement to real paired data, not a substitute for it: the negative fine-tuning result (Section~\ref{sec:rq3-results}) shows that simulated data alone, however well calibrated, does not automatically confer robustness.
+Concrete directions for narrowing the remaining simulation-to-real gap include histogram matching of simulated output against real target-sensor statistics, and calibrating the simulator against known ground-truth structures visible in both sensors.

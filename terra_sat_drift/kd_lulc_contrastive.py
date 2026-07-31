@@ -30,7 +30,8 @@ from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, Mode
 from lightning.pytorch.loggers import WandbLogger
 from terratorch.models.encoder_decoder_factory import EncoderDecoderFactory
 
-from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES
+from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES, WC_CLASS_PIXEL_FREQ
+from model_tasks.losses.segmentation import class_weights
 from dataset.datamodule_paired_triplets_lulc import PhisatPairedLULCDataModule
 from model_tasks.kd_contrastive_module import CrossSensorKDModule
 from student_mobilenet import create_student_model
@@ -117,6 +118,19 @@ def parse_args():
     p.add_argument("--w-instance", type=float, default=0.5, help="Cross-sensor NT-Xent weight.")
     p.add_argument("--w-pixel", type=float, default=0.1, help="Semantic-guided pixel contrast weight.")
     p.add_argument("--w-crd", type=float, default=0.0, help="CRD-style teacher/student contrast weight.")
+    # task loss (class imbalance)
+    p.add_argument("--task-loss", type=str, default="ce", choices=["ce", "focal"],
+                   help="Focal down-weights already-confident pixels so gradient mass "
+                        "moves to the rare classes plain CE never learns.")
+    p.add_argument("--focal-gamma", type=float, default=2.0,
+                   help="Focusing parameter; 0 == weighted CE, 2.0 is the RetinaNet default.")
+    p.add_argument("--class-weights", type=str, default="none",
+                   choices=["none", "inverse", "inverse_sqrt", "effective"],
+                   help="Per-class weights from the measured WorldCover pixel frequencies. "
+                        "'inverse_sqrt' is the recommended start; 'inverse' is ~60x "
+                        "moss-vs-tree here and destabilises easily.")
+    p.add_argument("--class-weight-beta", type=float, default=0.999,
+                   help="beta for --class-weights effective (Cui et al. 2019).")
     # distillation
     p.add_argument("--kd-mode", type=str, default="kl", choices=["kl", "mse"])
     p.add_argument("--kd-temperature", type=float, default=4.0)
@@ -203,6 +217,13 @@ def main():
         w_instance=args.w_instance,
         w_pixel=args.w_pixel,
         w_crd=args.w_crd,
+        task_loss=args.task_loss,
+        focal_gamma=args.focal_gamma,
+        class_weights=(
+            None if args.class_weights == "none"
+            else class_weights(WC_CLASS_PIXEL_FREQ, scheme=args.class_weights,
+                               beta=args.class_weight_beta)
+        ),
         kd_mode=args.kd_mode,
         kd_temperature=args.kd_temperature,
         kd_on_unlabeled=not args.kd_labeled_only,

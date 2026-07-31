@@ -22,12 +22,14 @@ from typing import Optional
 
 import albumentations as A
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
 from .constants import WC_CLASS_MAPPING
+from .plot_utils import labels_to_rgb, legend_handles, stretch_rgb
 
 # Product ids excluded upstream for radiometric/geometric quality reasons.
 # Kept identical to the single-domain datasets so splits stay comparable.
@@ -164,12 +166,17 @@ class PhisatPairedLULCDataset(Dataset):
         source_domain: str = "s2b",
         domain_stats: Optional[dict] = None,
     ):
-        if target_domain == source_domain:
+        # `source_domain=None` puts the dataset in single-domain mode: only the
+        # target view is read and returned. That is what the no-KD baseline
+        # needs, and routing it through this class rather than a separate one
+        # means the baseline inherits the *identical* split, normalisation and
+        # augmentation as the KD runs -- which is the whole point of a control.
+        if source_domain is not None and target_domain == source_domain:
             raise ValueError("target_domain and source_domain must differ for paired training.")
 
         stats_table = domain_stats if domain_stats is not None else DOMAIN_STATS
         for name in (target_domain, source_domain):
-            if name not in stats_table:
+            if name is not None and name not in stats_table:
                 raise ValueError(f"Unknown domain {name!r}; known: {sorted(stats_table)}")
 
         self.h5_images_path = h5_images_path
@@ -177,8 +184,9 @@ class PhisatPairedLULCDataset(Dataset):
         self.transform = transform
         self.target_domain = target_domain
         self.source_domain = source_domain
+        self.paired = source_domain is not None
         self.target_stats = stats_table[target_domain]
-        self.source_stats = stats_table[source_domain]
+        self.source_stats = stats_table[source_domain] if self.paired else None
 
         df = pd.read_csv(manifest_path)
         df = df[~df["product_id"].isin(BAD_PRODUCT_IDS)].reset_index(drop=True)
@@ -227,25 +235,92 @@ class PhisatPairedLULCDataset(Dataset):
         label_h5_idx = int(row["label_h5_index"])
 
         img_t = self._read_view(patch_idx, self.target_stats)
-        img_s = self._read_view(patch_idx, self.source_stats)
+        img_s = self._read_view(patch_idx, self.source_stats) if self.paired else None
 
         mask = self.h5_labels["worldcover/labels"][label_h5_idx].astype(np.int64)
         mask = self._wc_lut[np.clip(mask, 0, 255)]
 
         if self.transform is not None:
-            # Albumentations works in HWC; the HDF5 stores CHW.
-            out = self.transform(
-                image=np.ascontiguousarray(img_t.transpose(1, 2, 0)),
-                image_source=np.ascontiguousarray(img_s.transpose(1, 2, 0)),
-                mask=mask,
-            )
+            # Albumentations works in HWC; the HDF5 stores CHW. An unused
+            # `additional_target` is simply ignored, so the same Compose serves
+            # both modes and the sampled augmentation is identical either way.
+            kwargs = {"image": np.ascontiguousarray(img_t.transpose(1, 2, 0)), "mask": mask}
+            if self.paired:
+                kwargs["image_source"] = np.ascontiguousarray(img_s.transpose(1, 2, 0))
+            out = self.transform(**kwargs)
             img_t = out["image"].transpose(2, 0, 1)
-            img_s = out["image_source"].transpose(2, 0, 1)
             mask = out["mask"]
+            if self.paired:
+                img_s = out["image_source"].transpose(2, 0, 1)
 
-        return {
+        sample = {
             "image_target": torch.as_tensor(np.ascontiguousarray(img_t)).float(),
-            "image_source": torch.as_tensor(np.ascontiguousarray(img_s)).float(),
             "mask": torch.as_tensor(np.ascontiguousarray(mask)).long(),
             "patch_index": torch.as_tensor(patch_idx).long(),
         }
+        if self.paired:
+            sample["image_source"] = torch.as_tensor(np.ascontiguousarray(img_s)).float()
+        return sample
+
+    DOMAIN_LABELS = {
+        "real": "PhiSat-2 (real)",
+        "sim": "PhiSat-2 (simulated)",
+        "s2b": "Sentinel-2B",
+    }
+
+    def plot(self, sample: dict, suptitle: str | None = None, show_axes: bool = False):
+        """Plots the two co-registered views side by side with the label mask.
+
+        Both views are stretched independently, so the panels show the *content*
+        each sensor sees rather than their radiometric offset -- the two domains
+        sit on scales that differ by more than an order of magnitude, and a shared
+        stretch would render the PhiSat-2 view almost black.
+
+        Accepts an optional "prediction" entry, so the same method serves for
+        eyeballing model output.
+        """
+        def _np(x):
+            if x is None:
+                return None
+            if isinstance(x, torch.Tensor):
+                x = x.detach().cpu().numpy()
+            return x[0] if x.ndim == 4 or (x.ndim == 3 and x.shape[0] == 1 and x.shape[-1] != 3) else x
+
+        img_t = _np(sample["image_target"])
+        img_s = _np(sample.get("image_source"))   # absent in single-domain mode
+        mask = _np(sample["mask"])
+        prediction = _np(sample.get("prediction"))
+        if mask.ndim == 3:
+            mask = mask[0]
+        if prediction is not None and prediction.ndim == 3:
+            prediction = prediction[0]
+
+        panels = [(self.DOMAIN_LABELS.get(self.target_domain, self.target_domain),
+                   stretch_rgb(img_t))]
+        if img_s is not None:
+            panels.append((self.DOMAIN_LABELS.get(self.source_domain, self.source_domain),
+                           stretch_rgb(img_s)))
+        panels.append(("Mask", labels_to_rgb(mask)))
+        if prediction is not None:
+            panels.append(("Prediction", labels_to_rgb(prediction)))
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5))
+        for ax, (name, arr) in zip(np.atleast_1d(axes), panels):
+            ax.imshow(arr)
+            ax.set_title(name)
+            if not show_axes:
+                ax.axis("off")
+
+        if suptitle:
+            fig.suptitle(suptitle)
+
+        maps = [mask] if prediction is None else [mask, prediction]
+        fig.legend(
+            handles=legend_handles(*maps),
+            loc="center left",
+            bbox_to_anchor=(0.84, 0.5),
+            title="Class names",
+            frameon=True,
+        )
+        fig.tight_layout(rect=(0, 0, 0.82, 1))
+        return fig

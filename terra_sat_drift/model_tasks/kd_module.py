@@ -243,11 +243,26 @@ class KDSegmentationModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, batch_idx, prefix="train")["loss"]
 
+    def on_validation_epoch_start(self) -> None:
+        """Picks which validation batch to plot this epoch.
+
+        Hardcoding batch 0 (as this did) plots the identical patches every epoch,
+        because the validation loader is not shuffled. Seeded by epoch so the
+        choice varies but stays reproducible and agrees across DDP ranks.
+        """
+        n = getattr(self.trainer, "num_val_batches", None) if self.trainer else None
+        if isinstance(n, (list, tuple)):
+            n = n[0] if n else 0
+        self._plot_batch_idx = (
+            int(np.random.default_rng(self.current_epoch).integers(0, n))
+            if isinstance(n, int) and n > 0 else 0
+        )
+
     def validation_step(self, batch, batch_idx):
         outputs = self._shared_step(batch, batch_idx, prefix="val")
 
         should_plot = (
-            batch_idx == 0
+            batch_idx == getattr(self, "_plot_batch_idx", 0)
             and self.trainer is not None
             and self.trainer.is_global_zero
             and self.current_epoch % self.log_every_n_epochs == 0
