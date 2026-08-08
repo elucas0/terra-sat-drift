@@ -6,6 +6,8 @@ copy-pasted between the dataset classes, and the legend bug they all carried
 with WorldCover *codes* instead of class names) had to be fixed in each copy.
 """
 
+import matplotlib.pyplot as plt
+from typing import Optional
 import numpy as np
 from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
@@ -16,18 +18,45 @@ _PALETTE = np.array([to_rgb(c) for c in WC_CLASS_COLORS], dtype=np.float32)
 _NO_LABEL = np.array(to_rgb(NO_LABEL_COLOR), dtype=np.float32)
 
 
-def labels_to_rgb(label_map: np.ndarray) -> np.ndarray:
-    """Maps an (H, W) label map to an (H, W, 3) float image via the WorldCover legend.
+def build_palette(num_classes: int, class_colors=None) -> np.ndarray:
+    """Colour table for label maps, index-aligned with class ids.
+
+    Defaults to the official ESA WorldCover legend when the class count matches
+    that task, so every figure in the project -- dataset previews, the KD
+    modules' validation plots and the no-KD baseline's -- uses one colour scheme.
+    Other class counts (e.g. 2-class floods) fall back to a qualitative colormap.
+
+    This lives here, and not as a `_build_palette` staticmethod on each Lightning
+    module, because it previously existed as three near-copies that drifted: the
+    contrastive KD module kept a `tab20` palette and grey ignore pixels while the
+    baseline used the WorldCover legend and black, so the two families of runs
+    produced visually incomparable validation plots.
+    """
+    if class_colors is not None:
+        return np.asarray(class_colors, dtype=np.float32)
+    if num_classes == len(_PALETTE):
+        return _PALETTE.copy()
+    cmap = plt.get_cmap("tab20" if num_classes <= 20 else "gist_ncar")
+    return np.asarray([cmap(i / max(num_classes - 1, 1))[:3] for i in range(num_classes)],
+                      dtype=np.float32)
+
+
+def labels_to_rgb(label_map: np.ndarray, palette: Optional[np.ndarray] = None) -> np.ndarray:
+    """Maps an (H, W) label map to an (H, W, 3) float image.
 
     A direct lookup rather than `imshow(cmap=..., vmin=-1, vmax=10)`, so a class
     index always gets the same colour whichever classes a patch happens to
     contain, and so `legend_handles` can be built from the same table.
     Out-of-range and ignore_index (-1) pixels take the no-label colour.
+
+    `palette` defaults to the WorldCover legend; pass one from `build_palette`
+    for a task with a different class count.
     """
     label_map = np.asarray(label_map)
+    pal = _PALETTE if palette is None else np.asarray(palette, dtype=np.float32)
     out = np.tile(_NO_LABEL, (*label_map.shape, 1))
-    valid = (label_map >= 0) & (label_map < len(_PALETTE))
-    out[valid] = _PALETTE[label_map[valid]]
+    valid = (label_map >= 0) & (label_map < len(pal))
+    out[valid] = pal[label_map[valid]]
     return out
 
 

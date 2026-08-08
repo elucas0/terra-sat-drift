@@ -100,7 +100,7 @@ def main():
         plot_on_val=True,
     )
 
-    logger = WandbLogger(project="encoder-lulc", name=f"pretrain_lulc_s2b_{args.backbone}")
+    logger = WandbLogger(project="encoder-lulc", name=f"pretrain_lulc_s2b_{args.backbone}_50k")
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",

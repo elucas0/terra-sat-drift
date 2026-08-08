@@ -38,6 +38,12 @@ class PhisatRealLULCDataModule(pl.LightningDataModule):
         train_transform: A.Compose | None,
         val_transform: A.Compose | None,
         max_samples: Optional[int] = None,
+        # Evaluation sizes are independent of the training cap: tying them
+        # together makes a label-scarcity study change the measurement and the
+        # treatment at once, and shrinks the eval set until rare classes vanish
+        # from it (which silently changes the mIoU denominator).
+        val_max_samples: Optional[int] = 1000,
+        test_max_samples: Optional[int] = None,
     ):
         super().__init__()
         self.h5_images_path = h5_images_path
@@ -48,10 +54,13 @@ class PhisatRealLULCDataModule(pl.LightningDataModule):
         self.train_transform = train_transform
         self.val_transform = val_transform
         self.max_samples = max_samples
+        self.val_max_samples = val_max_samples
+        self.test_max_samples = test_max_samples
 
     def setup(self, stage: Optional[str] = None):
         train_max_samples = self.max_samples
-        val_max_samples = max(1, self.max_samples // 10) if self.max_samples else None
+        val_max_samples = self.val_max_samples
+        test_max_samples = self.test_max_samples
 
         if stage in (None, "fit"):
             self.train_dataset = PhisatRealLULCDataset(
@@ -76,7 +85,7 @@ class PhisatRealLULCDataModule(pl.LightningDataModule):
                 self.manifest_path,
                 "test",
                 self.val_transform,
-                val_max_samples,
+                test_max_samples,
             )
 
     def train_dataloader(self):

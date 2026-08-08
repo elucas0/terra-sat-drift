@@ -35,12 +35,9 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardInde
 from .losses.segmentation import focal_ce_loss
 
 try:  # imported two ways in this repo; see kd_module for the same shim
-    from ..dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
+    from ..dataset.plot_utils import build_palette, labels_to_rgb
 except ImportError:  # pragma: no cover
-    try:
-        from dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
-    except ImportError:
-        NO_LABEL_COLOR, WC_CLASS_COLORS = "#000000", None
+    from dataset.plot_utils import build_palette, labels_to_rgb
 
 
 class SupervisedSegmentationModule(pl.LightningModule):
@@ -173,7 +170,13 @@ class SupervisedSegmentationModule(pl.LightningModule):
 
     def _epoch_end(self, prefix):
         metric = self.metrics[f"{prefix}_iou_per_class"]
-        self.log_dict(metric.compute(), sync_dist=True)
+        per_class = metric.compute()
+        self.log_dict(per_class, sync_dist=True)
+        # Constant-denominator macro mIoU; see kd_contrastive_module._epoch_end
+        # for why the aggregate `student_target_iou` is not safe to compare
+        # across models when a class can be absent from the eval split.
+        self.log(f"{prefix}/student_target_iou_fixed",
+                 torch.stack(list(per_class.values())).mean(), sync_dist=True)
         metric.reset()
         support = getattr(self, f"_support_{prefix}")
         names = self.class_names or [str(i) for i in range(self.num_classes)]
@@ -200,15 +203,8 @@ class SupervisedSegmentationModule(pl.LightningModule):
 
     # ------------------------------------------------------------------
     def _labels_to_rgb(self, label_map):
-        from matplotlib.colors import to_rgb
-        palette = (np.array([to_rgb(c) for c in WC_CLASS_COLORS], dtype=np.float32)
-                   if WC_CLASS_COLORS else
-                   np.asarray(plt.get_cmap("tab20")(np.linspace(0, 1, self.num_classes))[:, :3],
-                              dtype=np.float32))
-        out = np.full((*label_map.shape, 3), to_rgb(NO_LABEL_COLOR), dtype=np.float32)
-        valid = (label_map >= 0) & (label_map < len(palette))
-        out[valid] = palette[label_map[valid]]
-        return out
+        """Shared colour table, so these figures match the KD runs' exactly."""
+        return labels_to_rgb(label_map, build_palette(self.num_classes))
 
     def _to_rgb(self, img):
         idx = [i for i in self.rgb_band_indices if i < img.shape[0]]

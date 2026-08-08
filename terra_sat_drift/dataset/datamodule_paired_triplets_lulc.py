@@ -27,8 +27,24 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
             ``A.Compose([])`` explicitly to disable augmentation.
         val_transform: joint augmentation for val/test; ``None`` (no-op) is the
             sensible default.
-        max_samples: cap on training samples (val/test get a tenth of it).
+        max_samples: cap on *training* patches. Deliberately does **not** size
+            the evaluation sets -- see below.
+        val_max_samples: cap on validation patches, independent of
+            ``max_samples``. Validation runs every epoch, so it has to stay
+            cheap; 1000 is the smallest size that still contains all 11
+            WorldCover classes (snow/ice appears in 14 of them).
+        test_max_samples: cap on test patches; ``None`` uses the full 25,323.
+            Test runs once, so it can afford to be thorough -- the full split
+            gives snow/ice 255 patches instead of 14.
         target_domain / source_domain: which HDF5 views to pair.
+
+    Why the evaluation sets are decoupled from ``max_samples``: they used to be
+    ``max_samples // 10``, which meant a label-scarcity study changed the
+    *measurement* at the same time as the treatment. At ``--max-samples 1000``
+    that left 100 evaluation patches, in which snow/ice is absent entirely --
+    and an absent class silently changes the denominator of
+    ``torchmetrics.JaccardIndex``, so two models were being averaged over
+    different numbers of classes and their mIoU was not comparable.
     """
 
     def __init__(
@@ -41,6 +57,8 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
         train_transform: A.Compose | None = None,
         val_transform: A.Compose | None = None,
         max_samples: Optional[int] = None,
+        val_max_samples: Optional[int] = 1000,
+        test_max_samples: Optional[int] = None,
         target_domain: str = "real",
         source_domain: Optional[str] = "s2b",
         augment: bool = True,
@@ -59,6 +77,8 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
         )
         self.val_transform = val_transform
         self.max_samples = max_samples
+        self.val_max_samples = val_max_samples
+        self.test_max_samples = test_max_samples
         self.target_domain = target_domain
         self.source_domain = source_domain
 
@@ -75,14 +95,11 @@ class PhisatPairedLULCDataModule(pl.LightningDataModule):
         )
 
     def setup(self, stage: Optional[str] = None):
-        train_max = self.max_samples
-        eval_max = max(1, self.max_samples // 10) if self.max_samples else None
-
         if stage in (None, "fit"):
-            self.train_dataset = self._build("train", self.train_transform, train_max)
-            self.val_dataset = self._build("val", self.val_transform, eval_max)
+            self.train_dataset = self._build("train", self.train_transform, self.max_samples)
+            self.val_dataset = self._build("val", self.val_transform, self.val_max_samples)
         if stage in (None, "fit", "test"):
-            self.test_dataset = self._build("test", self.val_transform, eval_max)
+            self.test_dataset = self._build("test", self.val_transform, self.test_max_samples)
 
     def _loader(self, dataset, shuffle: bool) -> DataLoader:
         return DataLoader(

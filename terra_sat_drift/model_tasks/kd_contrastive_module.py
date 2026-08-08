@@ -97,6 +97,13 @@ from .losses.contrastive import (
 )
 from .losses.segmentation import focal_ce_loss
 
+# Imported two ways in this repo (package-relative, and flat with terra_sat_drift
+# on sys.path from kd_lulc_contrastive.py); only one root resolves in each case.
+try:
+    from ..dataset.plot_utils import build_palette, labels_to_rgb
+except ImportError:  # pragma: no cover - depends on how the caller set sys.path
+    from dataset.plot_utils import build_palette, labels_to_rgb
+
 # Domain branch ids used for DSBN routing.
 SOURCE_DOMAIN_ID = 0  # Sentinel-2, the teacher's home domain
 TARGET_DOMAIN_ID = 1  # PhiSat-2, the deployment domain
@@ -192,6 +199,7 @@ class CrossSensorKDModule(pl.LightningModule):
         proto_momentum: float = 0.999,
         max_pixels_per_class: int = 128,
         contrastive_warmup_epochs: int = 1,
+        label_smoothing: float = 0.0,
         # --- architecture / plumbing --------------------------------------
         use_dsbn: bool = False,
         lr_monitor: Optional[str] = "val/student_target_iou",
@@ -249,6 +257,7 @@ class CrossSensorKDModule(pl.LightningModule):
         self.cross_view_negatives_only = cross_view_negatives_only
         self.pixel_feat_size = pixel_feat_size
         self.contrastive_warmup_epochs = max(contrastive_warmup_epochs, 0)
+        self.label_smoothing = label_smoothing
 
         self.lr_monitor = lr_monitor
         self.lr_monitor_mode = lr_monitor_mode
@@ -517,6 +526,7 @@ class CrossSensorKDModule(pl.LightningModule):
                 z_s, z_t,
                 temperature=self.instance_temperature,
                 cross_view_negatives_only=self.cross_view_negatives_only,
+                label_smoothing=self.label_smoothing
             )
             if self.w_instance > 0
             else zero
@@ -650,7 +660,22 @@ class CrossSensorKDModule(pl.LightningModule):
 
     def _epoch_end(self, prefix: str) -> None:
         metric = self.metrics[f"{prefix}_student_target_iou_per_class"]
-        self.log_dict(metric.compute(), sync_dist=True)
+        per_class = metric.compute()
+        self.log_dict(per_class, sync_dist=True)
+
+        # Fixed-denominator macro mIoU: the mean over *all* num_classes, with
+        # absent classes counted as 0.
+        #
+        # `torchmetrics.JaccardIndex` (logged as student_target_iou) drops
+        # classes with zero union from its macro average, so its denominator
+        # depends on which classes the model happens to predict. Two models
+        # evaluated on the same data can therefore be averaged over different
+        # numbers of classes -- observed at eval size 100, where snow/ice was
+        # absent, one model was scored over 10 classes and the other over 11,
+        # and the resulting mIoU were not comparable. This metric has a constant
+        # denominator and is the safe one for cross-model comparison.
+        self.log(f"{prefix}/student_target_iou_fixed",
+                 torch.stack(list(per_class.values())).mean(), sync_dist=True)
         metric.reset()
 
         support = getattr(self, f"_support_{prefix}")
@@ -740,10 +765,7 @@ class CrossSensorKDModule(pl.LightningModule):
     # ------------------------------------------------------------------
     @staticmethod
     def _build_palette(num_classes: int, class_colors) -> np.ndarray:
-        if class_colors is not None:
-            return np.asarray(class_colors, dtype=float)
-        cmap = plt.get_cmap("tab20" if num_classes <= 20 else "gist_ncar")
-        return np.asarray([cmap(i / max(num_classes - 1, 1))[:3] for i in range(num_classes)], dtype=float)
+        return build_palette(num_classes, class_colors)
 
     def _to_rgb(self, img: torch.Tensor) -> np.ndarray:
         c = img.shape[0]
@@ -756,12 +778,9 @@ class CrossSensorKDModule(pl.LightningModule):
         return np.clip((rgb - lo) / np.clip(hi - lo, 1e-6, None), 0, 1)
 
     def _labels_to_rgb(self, label_map: np.ndarray) -> np.ndarray:
-        label_map = label_map.astype(int)
-        h, w = label_map.shape
-        out = np.full((h, w, 3), 0.5, dtype=np.float32)  # gray = ignore
-        valid = (label_map >= 0) & (label_map < self.num_classes)
-        out[valid] = self.class_colors[label_map[valid]]
-        return out
+        # Shared with the datasets' `plot` and the no-KD baseline, so the
+        # validation figures of every training path use one colour scheme.
+        return labels_to_rgb(label_map.astype(int), self.class_colors)
 
     def _log_qualitative(self, out: dict, split: str = "val") -> None:
         """Plots both sensor views with the student's prediction on each.

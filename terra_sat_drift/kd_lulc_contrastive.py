@@ -102,6 +102,14 @@ def parse_args():
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--num-workers", type=int, default=16)
     p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--val-max-samples", type=int, default=1000,
+                   help="Validation patches. Fixed, NOT derived from --max-samples: "
+                        "1000 is the smallest size containing all 11 classes. Keep it "
+                        "constant across runs you intend to compare.")
+    p.add_argument("--test-max-samples", type=int, default=None,
+                   help="Test patches; default None = the full 25,323. Test runs once, "
+                        "so it can afford to be thorough (snow/ice on 255 patches "
+                        "instead of 14).")
     p.add_argument("--target-domain", type=str, default="real", choices=["real", "sim"],
                    help="Sensor the student must work on at deployment.")
     p.add_argument("--source-domain", type=str, default="s2b", choices=["s2b"],
@@ -149,6 +157,8 @@ def parse_args():
     p.add_argument("--proto-momentum", type=float, default=0.999)
     p.add_argument("--max-pixels-per-class", type=int, default=128)
     p.add_argument("--contrastive-warmup-epochs", type=int, default=1)
+    p.add_argument("--label-smoothing", type=float, default=0.0,
+                   help="Label smoothing for instance contrastive loss (default 0.0 = none).")
     # architecture
     p.add_argument("--use-dsbn", action="store_true",
                    help="Domain-specific BatchNorm in the student (Chang et al. 2019).")
@@ -185,6 +195,8 @@ def main():
         train_transform=A.Compose([]) if args.no_augment else None,
         val_transform=None,
         max_samples=args.max_samples,
+        val_max_samples=args.val_max_samples,
+        test_max_samples=args.test_max_samples,
         target_domain=args.target_domain,
         source_domain=args.source_domain,
     )
@@ -226,6 +238,7 @@ def main():
         ),
         kd_mode=args.kd_mode,
         kd_temperature=args.kd_temperature,
+        label_smoothing=args.label_smoothing,
         kd_on_unlabeled=not args.kd_labeled_only,
         distill_source_branch=not args.no_distill_source,
         instance_temperature=args.instance_temperature,

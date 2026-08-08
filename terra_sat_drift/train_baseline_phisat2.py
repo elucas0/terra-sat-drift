@@ -57,6 +57,14 @@ def parse_args():
     p.add_argument("--max-samples", type=int, default=None,
                    help="Cap on training patches. The KD runs so far used 10000 "
                         "(5%% of the split); match it for a like-for-like comparison.")
+    p.add_argument("--val-max-samples", type=int, default=1000,
+                   help="Validation patches. Fixed, NOT derived from --max-samples: "
+                        "1000 is the smallest size containing all 11 classes. Keep it "
+                        "constant across runs you intend to compare.")
+    p.add_argument("--test-max-samples", type=int, default=None,
+                   help="Test patches; default None = the full 25,323. Test runs once, "
+                        "so it can afford to be thorough (snow/ice on 255 patches "
+                        "instead of 14).")
     p.add_argument("--no-augment", action="store_true")
     p.add_argument("--task-loss", type=str, default="ce", choices=["ce", "focal"])
     p.add_argument("--focal-gamma", type=float, default=2.0)
@@ -97,6 +105,8 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_samples=args.max_samples,
+        val_max_samples=args.val_max_samples,
+        test_max_samples=args.test_max_samples,
         augment=not args.no_augment,
         target_domain=args.target_domain,
         source_domain=None,

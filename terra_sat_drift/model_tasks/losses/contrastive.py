@@ -137,11 +137,47 @@ def dense_kd_loss(
 # ----------------------------------------------------------------------------
 # 2. Instance-level cross-sensor contrast (the domain-invariance driver)
 # ----------------------------------------------------------------------------
+def _soft_target_ce(
+    logits: torch.Tensor,
+    positives: torch.Tensor,
+    label_smoothing: float,
+    invalid: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Cross-entropy against a smoothed target distribution.
+
+    Places ``1 - label_smoothing`` on the positive and spreads
+    ``label_smoothing`` uniformly over that row's *valid negatives*, following
+    the softened targets of X-STARS [Marsocci25, eq. 7]. Note this normalises
+    over the negatives rather than over all classes, so it differs slightly
+    from ``F.cross_entropy(label_smoothing=...)``, which divides by the class
+    count including the positive. The difference is negligible for large
+    batches but the paper's convention is the one implemented here.
+
+    ``invalid`` marks entries excluded from the softmax (the self-similarity
+    positions in the SimCLR formulation). Those carry zero target mass, and
+    their log-probabilities are zeroed before the product so that the
+    ``0 * -inf`` they would otherwise produce cannot become NaN.
+
+    ``label_smoothing=0`` reduces exactly to standard cross-entropy.
+    """
+    valid = torch.ones_like(logits, dtype=torch.bool) if invalid is None else ~invalid
+    # one positive per row, always valid, so the negatives are valid minus one
+    n_neg = (valid.sum(dim=1) - 1).clamp(min=1)
+    target = valid.to(logits.dtype) * (label_smoothing / n_neg).unsqueeze(1)
+    target.scatter_(1, positives.unsqueeze(1), 1.0 - label_smoothing)
+
+    logp = F.log_softmax(logits, dim=1)
+    if invalid is not None:
+        logp = logp.masked_fill(invalid, 0.0)
+    return -(target * logp).sum(dim=1).mean()
+
+
 def nt_xent_cross_domain(
     z_a: torch.Tensor,
     z_b: torch.Tensor,
     temperature: float = 0.1,
     cross_view_negatives_only: bool = False,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Symmetric NT-Xent over two co-registered sensor views of the same patch.
 
@@ -166,6 +202,16 @@ def nt_xent_cross_domain(
         cross_view_negatives_only: if True use only the N-1 opposite-view
             negatives (the CLIP / CROMA formulation); if False use all 2N-2
             in-batch negatives (the original SimCLR formulation, default).
+        label_smoothing: mass moved off the positive and spread over the
+            negatives, as in the softened MSAD targets of X-STARS
+            [Marsocci25], which uses 0.3. Hard targets assert that a
+            co-registered pair is a perfect positive and that every other
+            patch is a perfect negative; neither holds exactly here. The two
+            sensors observe the same ground a median of ~7 days apart, so a
+            "positive" pair can contain real seasonal or structural change,
+            and distinct patches of e.g. the same forest are genuinely
+            near-identical. Smoothing relaxes both. Default 0 preserves the
+            previous behaviour exactly.
 
     Returns:
         Scalar loss.
@@ -177,7 +223,10 @@ def nt_xent_cross_domain(
     if cross_view_negatives_only:
         logits = z_a @ z_b.t() / temperature  # (N, N)
         targets = torch.arange(n, device=z_a.device)
-        return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.t(), targets))
+        return 0.5 * (
+            _soft_target_ce(logits, targets, label_smoothing)
+            + _soft_target_ce(logits.t(), targets, label_smoothing)
+        )
 
     z = torch.cat([z_a, z_b], dim=0)  # (2N, D)
     sim = z @ z.t() / temperature
@@ -187,7 +236,7 @@ def nt_xent_cross_domain(
     targets = torch.cat(
         [torch.arange(n, 2 * n, device=z.device), torch.arange(0, n, device=z.device)]
     )
-    return F.cross_entropy(sim, targets)
+    return _soft_target_ce(sim, targets, label_smoothing, invalid=self_mask)
 
 
 # ----------------------------------------------------------------------------

@@ -16,13 +16,12 @@ from torchmetrics import ClasswiseWrapper
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 from lightning.pytorch.loggers import WandbLogger
 
+# Imported two ways in this repo (package-relative, and flat with terra_sat_drift
+# on sys.path from kd_lulc.py); only one root resolves in each case.
 try:
-    from ..dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
-except ImportError:
-    try:
-        from dataset.constants import NO_LABEL_COLOR, WC_CLASS_COLORS
-    except ImportError:
-        NO_LABEL_COLOR, WC_CLASS_COLORS = "#000000", None
+    from ..dataset.plot_utils import build_palette, labels_to_rgb
+except ImportError:  # pragma: no cover - depends on how the caller set sys.path
+    from dataset.plot_utils import build_palette, labels_to_rgb
 
 
 class KDSegmentationModule(pl.LightningModule):
@@ -314,21 +313,9 @@ class KDSegmentationModule(pl.LightningModule):
     # ------------------------------------------------------------------
     @staticmethod
     def _build_palette(num_classes: int, class_colors: Optional[Sequence[Sequence[float]]]) -> np.ndarray:
-        """Colour table for the qualitative plots, index-aligned with class ids.
-
-        Defaults to the official ESA WorldCover legend when the class count
-        matches that task, so the training-time plots use the same colours as
-        the datasets' own `plot` methods and the dataset report figures. This
-        module is task-generic, so any other class count (e.g. 2-class floods)
-        falls back to a qualitative colormap.
-        """
-        if class_colors is not None:
-            return np.asarray(class_colors, dtype=float)
-        if WC_CLASS_COLORS is not None and num_classes == len(WC_CLASS_COLORS):
-            return np.asarray([to_rgb(c) for c in WC_CLASS_COLORS], dtype=float)
-        cmap = plt.get_cmap("tab20" if num_classes <= 20 else "gist_ncar")
-        colors = [cmap(i / max(num_classes - 1, 1))[:3] for i in range(num_classes)]
-        return np.asarray(colors, dtype=float)
+        """Shared with the datasets and the other training modules -- see
+        `dataset.plot_utils.build_palette`."""
+        return build_palette(num_classes, class_colors)
 
     def _to_rgb(self, img: torch.Tensor) -> np.ndarray:
         """Builds a contrast-stretched RGB composite from a (C, H, W) tensor, for display only."""
@@ -343,15 +330,8 @@ class KDSegmentationModule(pl.LightningModule):
         return rgb
 
     def _labels_to_rgb(self, label_map: np.ndarray) -> np.ndarray:
-        """Maps a (H, W) integer label map to an (H, W, 3) RGB image using self.class_colors."""
-        label_map = label_map.astype(int)
-        h, w = label_map.shape
-        # Ignore/out-of-range pixels take the same no-label colour the datasets'
-        # own `plot` uses, so the two sets of figures can be read side by side.
-        out = np.full((h, w, 3), to_rgb(NO_LABEL_COLOR), dtype=np.float32)
-        valid = (label_map >= 0) & (label_map < self.num_classes)
-        out[valid] = self.class_colors[label_map[valid]]
-        return out
+        """Maps a (H, W) label map to (H, W, 3) using the shared colour table."""
+        return labels_to_rgb(label_map.astype(int), self.class_colors)
 
     def _log_qualitative_predictions(self, images, masks, teacher_pred, student_pred, split="val"):
         if self.logger is None:
