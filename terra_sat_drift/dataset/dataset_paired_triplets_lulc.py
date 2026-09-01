@@ -79,6 +79,63 @@ DOMAIN_STATS: dict[str, dict] = {
     },
 }
 
+# --- 8-channel views for the PhiSat-2 foundation-model student ------------------
+#
+# The HydraNet / Phi2FM PhiSat-2 student (`hydranet-phisat2`) has a
+# `Conv2d(8, 16, 1)` stem, and its channel contract is the PhilEO band order
+# documented in that repo's own validated notebook
+# (`notebooks/decoders/1_worldfloods.ipynb`, "Quick Failure Checks"):
+#
+#     B02, B03, B04, B08, B05, B06, B07, PAN
+#     Blue, Green, Red, NIR, RedEdge1, RedEdge2, RedEdge3, Panchromatic
+#
+# The triplets HDF5 stores PhiSat-2 in a *different* order -- PAN, Blue, Green,
+# Red, RE1, RE2, RE3, NIR (triplets_v1/README.md) -- so `band_slice` below is a
+# permutation rather than a slice. `_read_view` indexes a numpy array, which
+# accepts a list, so the reorder and the subset happen in one step and nothing
+# else in the pipeline has to know.
+#
+# Feeding these bands in the stored order instead would silently route PAN into
+# the stem column trained for Blue and NIR into the column trained for RE1. With
+# a frozen encoder there is no way for training to recover from that, and the
+# failure is quiet: the model still trains, just worse.
+#
+# The statistics are the same per-band numbers as the 7-band entries above,
+# permuted to match, plus the PAN band from the same README table (real: mean
+# 15.0381, std 8.2196; sim: 49.7866 / 7.2800). Clip and clip mode are unchanged,
+# so `real8` and `real` differ *only* by the extra PAN channel and the ordering.
+DOMAIN_STATS.update({
+    "real8": {
+        "mean": np.array([14.5305, 14.4030, 15.4191, 13.1745, 13.6231, 14.2143, 14.7041, 15.0381], dtype=np.float32),
+        "std": np.array([10.6197, 9.4811, 9.0923, 9.7216, 10.5712, 10.4277, 10.3784, 8.2196], dtype=np.float32),
+        "clip": 38.729,
+        "clip_mode": "smooth",
+        "h5_key": "real/images",
+        "band_slice": [1, 2, 3, 7, 4, 5, 6, 0],
+    },
+    "sim8": {
+        "mean": np.array([49.0253, 48.4297, 49.2364, 56.7808, 51.1648, 55.4065, 57.3572, 49.7866], dtype=np.float32),
+        "std": np.array([6.5203, 6.9570, 9.0981, 8.3664, 8.3858, 7.9555, 8.3155, 7.2800], dtype=np.float32),
+        "clip": 100.0,
+        "clip_mode": "hard",
+        "h5_key": "sim/images",
+        "band_slice": [1, 2, 3, 7, 4, 5, 6, 0],
+    },
+    # Sentinel-2B has no panchromatic band, so the 8-channel contract cannot be
+    # met exactly; `synth_pan` fills the last channel with a proxy (see
+    # `_read_view`). Runs on this domain are a cross-sensor control, not a
+    # like-for-like input -- say so wherever their numbers are reported.
+    "s2b8": {
+        "mean": np.array([49.0215, 48.4241, 49.2270, 56.7685, 51.1619, 55.4031, 57.3537], dtype=np.float32),
+        "std": np.array([6.5464, 6.9918, 9.1444, 8.4429, 8.3999, 7.9740, 8.3373], dtype=np.float32),
+        "clip": 100.0,
+        "clip_mode": "hard",
+        "h5_key": "s2b/images",
+        "band_slice": [0, 1, 2, 6, 3, 4, 5],
+        "synth_pan": True,
+    },
+})
+
 
 def smooth_clip(x: np.ndarray, clip_value: float, softness: float = 6.0) -> np.ndarray:
     """Smoothly saturates ``x`` toward ``clip_value`` instead of hard-clipping.
@@ -148,8 +205,10 @@ class PhisatPairedLULCDataset(Dataset):
         domain_stats: optional override of ``DOMAIN_STATS``.
 
     Returns per item:
-        ``image_target``  (7, H, W) float32, normalised with target statistics
-        ``image_source``  (7, H, W) float32, normalised with source statistics
+        ``image_target``  (C, H, W) float32, normalised with target statistics
+        ``image_source``  (C, H, W) float32, normalised with source statistics
+        (``C`` is 7 for the ``real``/``sim``/``s2b`` domains and 8 for the
+        ``*8`` variants, which serve the PhiSat-2 student's channel contract)
         ``mask``          (H, W)    int64, WorldCover mapped to 0..10, -1 = ignore
         ``patch_index``   scalar int64, the shared co-registration key
     """
@@ -222,7 +281,14 @@ class PhisatPairedLULCDataset(Dataset):
 
     def _read_view(self, patch_idx: int, stats: dict) -> np.ndarray:
         raw = self.h5_images[stats["h5_key"]][patch_idx][stats["band_slice"]].astype(np.float32)
-        return normalize_domain(raw, stats)
+        img = normalize_domain(raw, stats)
+        if stats.get("synth_pan"):
+            # Stand-in panchromatic channel: the mean of the already-standardised
+            # visible bands. It has the right position, scale and rough spectral
+            # support for the PhiSat-2 student's stem, but it is a construction,
+            # not a measurement.
+            img = np.concatenate([img, img[:3].mean(axis=0, keepdims=True)], axis=0)
+        return img
 
     def __getitem__(self, idx: int) -> dict:
         if self.h5_images is None:
@@ -266,6 +332,9 @@ class PhisatPairedLULCDataset(Dataset):
         "real": "PhiSat-2 (real)",
         "sim": "PhiSat-2 (simulated)",
         "s2b": "Sentinel-2B",
+        "real8": "PhiSat-2 (real, 8-band)",
+        "sim8": "PhiSat-2 (simulated, 8-band)",
+        "s2b8": "Sentinel-2B (8-band, synthetic PAN)",
     }
 
     def plot(self, sample: dict, suptitle: str | None = None, show_axes: bool = False):

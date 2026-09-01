@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 
 import lightning.pytorch as pl
 
-from dataset.dataset_triplets_lulc import PhisatRealLULCDataset
+from .dataset_triplets_lulc import PhisatRealLULCDataset
 
 class PhisatRealLULCDataModule(pl.LightningDataModule):
     def __init__(
@@ -71,14 +71,16 @@ class PhisatRealLULCDataModule(pl.LightningDataModule):
                 self.train_transform,
                 train_max_samples,
             )
-            self.val_dataset = PhisatRealLULCDataset(
-                self.h5_images_path,
-                self.h5_labels_path,
-                self.manifest_path,
-                "val",
-                self.val_transform,
-                val_max_samples,
-            )
+        
+        self.val_dataset = PhisatRealLULCDataset(
+            self.h5_images_path,
+            self.h5_labels_path,
+            self.manifest_path,
+            "val",
+            self.val_transform,
+            val_max_samples,
+        )
+        if stage in (None, "fit", "test"):
             self.test_dataset = PhisatRealLULCDataset(
                 self.h5_images_path,
                 self.h5_labels_path,

@@ -71,14 +71,15 @@ class PhisatS2LULCDataModule(pl.LightningDataModule):
                 self.train_transform,
                 train_max_samples,
             )
-            self.val_dataset = PhisatS2LULCDataset(
-                self.h5_images_path,
-                self.h5_labels_path,
-                self.manifest_path,
-                "val",
-                self.val_transform,
-                val_max_samples,
-            )
+        self.val_dataset = PhisatS2LULCDataset(
+            self.h5_images_path,
+            self.h5_labels_path,
+            self.manifest_path,
+            "val",
+            self.val_transform,
+            val_max_samples,
+        )
+        if stage in (None, "fit", "test"):
             self.test_dataset = PhisatS2LULCDataset(
                 self.h5_images_path,
                 self.h5_labels_path,

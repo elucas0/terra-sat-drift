@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 import lightning.pytorch as pl
 
 from dataset.datamodule_s2b_triplets_lulc import PhisatS2LULCDataModule
+from dataset.datamodule_real_triplets_lulc import PhisatRealLULCDataModule
 from dataset.constants import WC_CLASS_MAPPING
 
 def main(): 
@@ -47,7 +48,7 @@ def main():
     output_dir = Path(f"/shared/home/elucas/scratch/terra-sat-drift/outputs/{args.backbone}_pretrain_s2b_lulc")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    datamodule = PhisatS2LULCDataModule(
+    datamodule = PhisatRealLULCDataModule(
         h5_images_path=h5_images_path,
         h5_labels_path=h5_labels_path,
         manifest_path=manifest_path,
@@ -57,6 +58,17 @@ def main():
         val_transform=None,
         max_samples=args.max_samples,
     )
+    
+    # datamodule = PhisatS2LULCDataModule(
+    #     h5_images_path=h5_images_path,
+    #     h5_labels_path=h5_labels_path,
+    #     manifest_path=manifest_path,
+    #     batch_size=args.batch_size,
+    #     num_workers=16,
+    #     train_transform=None,
+    #     val_transform=None,
+    #     max_samples=args.max_samples,
+    # )
     
 
     # Model definition
@@ -87,18 +99,21 @@ def main():
         "num_classes": len(WC_CLASS_MAPPING), 
     }
 
-    task = SemanticSegmentationTask(
-        model_factory="EncoderDecoderFactory",
-        model_args=model_args,
-        lr=args.lr,
-        ignore_index=-1,
-        optimizer="AdamW",
-        optimizer_hparams={"weight_decay": 0.05},
-        class_names=list(WC_CLASS_MAPPING.keys()),
-        freeze_backbone=False,
-        freeze_decoder=False,
-        plot_on_val=True,
-    )
+    # task = SemanticSegmentationTask(
+    #     model_factory="EncoderDecoderFactory",
+    #     model_args=model_args,
+    #     lr=args.lr,
+    #     ignore_index=-1,
+    #     optimizer="AdamW",
+    #     optimizer_hparams={"weight_decay": 0.05},
+    #     class_names=list(WC_CLASS_MAPPING.keys()),
+    #     freeze_backbone=False,
+    #     freeze_decoder=False,
+    #     plot_on_val=True,
+    # )
+    
+    task = SemanticSegmentationTask.load_from_checkpoint(checkpoint_path="/shared/home/elucas/scratch/terra-sat-drift/outputs/terramind_v1_base_pretrain_lulc/checkpoints/best-val_mIoU.ckpt")
+
 
     logger = WandbLogger(project="encoder-lulc", name=f"pretrain_lulc_s2b_{args.backbone}_50k")
     
@@ -118,7 +133,7 @@ def main():
         callbacks=[checkpoint_callback, EarlyStopping(monitor="val/mIoU", patience=10, mode="max")],
     )
 
-    trainer.fit(task, datamodule=datamodule)
+    # trainer.fit(task, datamodule=datamodule)
     
     datamodule.setup(stage="test")
     trainer.test(task, datamodule=datamodule)

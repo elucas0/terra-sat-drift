@@ -148,6 +148,16 @@ class CrossSensorKDModule(pl.LightningModule):
         max_pixels_per_class: class-balanced sampling cap per class per step.
         contrastive_warmup_epochs: length of the linear ramp-up for terms (2)-(4).
         use_dsbn: convert the student's BatchNorm to domain-specific BatchNorm.
+        concat_batch: forward the two sensors as one concatenated batch instead
+            of two separate passes, so that a *shared* BatchNorm sees a mixed
+            batch. This is the control condition for the domain-specific
+            variant. With separate passes and shared BatchNorm, each pass is
+            normalised by its own domain's batch statistics while the running
+            averages accumulate a blend of both, so neither domain is evaluated
+            under the normalisation it was trained with; concatenating makes
+            training and inference use the same mixed statistics and removes
+            that inconsistency. Mutually exclusive with ``use_dsbn``, which
+            needs per-domain routing and therefore separate passes.
         lr_monitor: metric the ReduceLROnPlateau scheduler tracks. Defaults to
             target-domain IoU rather than total loss, because the total mixes
             five terms under a ramping schedule and so is not a stable signal.
@@ -157,6 +167,10 @@ class CrossSensorKDModule(pl.LightningModule):
             as ``{key: tensor}``. Set to ``None`` to pass a bare tensor.
         teacher_encoder_attr: attribute holding the teacher's encoder, hooked to
             obtain teacher embeddings for term (4).
+        teacher_band_indices: optional channel gather applied to the source view
+            *before* the teacher sees it, for students whose input contract
+            differs from the teacher's. ``None`` (default) passes the source view
+            through unchanged, which is what a 7-band student needs.
         ignore_index: label value excluded from losses and metrics.
         student_in_channels: input band count, used to probe feature dimensions.
         rgb_band_indices / num_samples_to_log / log_every_n_epochs /
@@ -202,10 +216,12 @@ class CrossSensorKDModule(pl.LightningModule):
         label_smoothing: float = 0.0,
         # --- architecture / plumbing --------------------------------------
         use_dsbn: bool = False,
+        concat_batch: bool = False,
         lr_monitor: Optional[str] = "val/student_target_iou",
         lr_monitor_mode: str = "max",
         teacher_input_key: Optional[str] = "S2L1C",
         teacher_encoder_attr: str = "encoder",
+        teacher_band_indices: Optional[Sequence[int]] = None,
         ignore_index: int = -1,
         student_in_channels: int = 7,
         rgb_band_indices: Sequence[int] = (2, 1, 0),
@@ -262,6 +278,14 @@ class CrossSensorKDModule(pl.LightningModule):
         self.lr_monitor = lr_monitor
         self.lr_monitor_mode = lr_monitor_mode
         self.teacher_input_key = teacher_input_key
+        # Registered as a buffer so it follows the module across devices; the
+        # teacher forward runs on whatever device the batch is on.
+        self.register_buffer(
+            "teacher_band_indices",
+            None if teacher_band_indices is None
+            else torch.as_tensor(list(teacher_band_indices), dtype=torch.long),
+            persistent=False,
+        )
         self.ignore_index = ignore_index
         self.rgb_band_indices = tuple(rgb_band_indices)
         self.num_samples_to_log = num_samples_to_log
@@ -277,6 +301,13 @@ class CrossSensorKDModule(pl.LightningModule):
         if use_dsbn:
             convert_to_dsbn(self.student, num_domains=2)
         self.use_dsbn = has_dsbn(self.student)
+        if concat_batch and self.use_dsbn:
+            raise ValueError(
+                "concat_batch and use_dsbn are mutually exclusive: domain-specific "
+                "BatchNorm routes each sensor through its own branch, which requires "
+                "one forward pass per domain."
+            )
+        self.concat_batch = concat_batch
 
         # --- projection heads -------------------------------------------
         bottleneck_dim, decoder_dim = self._probe_student_dims(student_in_channels)
@@ -410,10 +441,24 @@ class CrossSensorKDModule(pl.LightningModule):
             set_domain(self.student, domain_id)
         return self.student(x, return_features=True)
 
+    def _student_forward_concat(self, x_t: torch.Tensor, x_s: torch.Tensor) -> tuple[dict, dict]:
+        """One forward over ``cat([target, source])``, split back into two dicts."""
+        n = x_t.shape[0]
+        out = self.student(torch.cat([x_t, x_s], dim=0), return_features=True)
+        return ({k: v[:n] for k, v in out.items()},
+                {k: v[n:] for k, v in out.items()})
+
     @torch.no_grad()
     def _teacher_forward(self, x: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         self.teacher.eval()
         self._teacher_feat = None
+        if self.teacher_band_indices is not None:
+            # The student and the teacher do not have to consume the same stack.
+            # A student built for the 8-band PhiSat-2 contract takes the source
+            # view in its own channel order, while the teacher must still receive
+            # the seven S2L1C bands in the order its band config declares. Both
+            # views are the same pixels, so this is a gather, not a second read.
+            x = x.index_select(1, self.teacher_band_indices)
         inp = {self.teacher_input_key: x} if self.teacher_input_key else x
         out = self.teacher(inp)
         return self._unwrap_logits(out), self._teacher_feat
@@ -478,8 +523,16 @@ class CrossSensorKDModule(pl.LightningModule):
         ref_hw = mask.shape[-2:]
 
         # --- forward passes ---------------------------------------------
-        out_t = self._student_forward(x_t, TARGET_DOMAIN_ID)
-        out_s = self._student_forward(x_s, SOURCE_DOMAIN_ID)
+        if self.concat_batch:
+            # One pass over both sensors, so the shared BatchNorm normalises by
+            # statistics of the mixed batch and accumulates running averages of
+            # that same mixture. Note this doubles the effective batch size of
+            # the normalisation statistics, which is a deliberate part of the
+            # condition rather than a side effect to correct for.
+            out_t, out_s = self._student_forward_concat(x_t, x_s)
+        else:
+            out_t = self._student_forward(x_t, TARGET_DOMAIN_ID)
+            out_s = self._student_forward(x_s, SOURCE_DOMAIN_ID)
         teacher_logits, teacher_feat = self._teacher_forward(x_s)
 
         logits_t = self._align_spatial(out_t["logits"], ref_hw)

@@ -211,6 +211,7 @@ experiments
 datasets
 *.bin
 outputs
+weights
 lightning_logs
 wandb
 thesis

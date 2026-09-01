@@ -35,12 +35,36 @@ from model_tasks.losses.segmentation import class_weights
 from dataset.datamodule_paired_triplets_lulc import PhisatPairedLULCDataModule
 from model_tasks.kd_contrastive_module import CrossSensorKDModule
 from student_mobilenet import create_student_model
+from phisatnet_student import create_phisatnet_student, resolve_checkpoint
 
 warnings.filterwarnings("ignore")
 
 H5_IMAGES = "/shared/projects/phisat2/data/processed/triplets_v1/phisat2_s2b_dataset_v1.h5"
 H5_LABELS = "/shared/projects/phisat2/data/processed/worldcover_all_clean_v1/worldcover_all_clean_labels_v1.h5"
 MANIFEST = "/shared/projects/phisat2/data/processed/worldcover_all_clean_v1/worldcover_all_clean_manifest_v1.csv"
+
+# Per-student input contract. The UNet student and the TerraMind teacher both
+# consume the same seven S2L1C bands, so nothing has to be reordered between
+# them. PhisatNet does not: its stem was built for eight bands in the PhilEO
+# order (Blue, Green, Red, NIR, RE1, RE2, RE3, PAN), so the source view is
+# served as `s2b8` and the teacher takes a gather back to its own seven-band
+# order. Both models see the same pixels either way.
+STUDENT_SPECS = {
+    "unet": {
+        "in_channels": 7,
+        "target_domain": "real",
+        "source_domain": "s2b",
+        "teacher_band_indices": None,
+    },
+    "phisatnet": {
+        "in_channels": 8,
+        "target_domain": "real8",
+        "source_domain": "s2b8",
+        # s2b8 is [B, G, R, NIR, RE1, RE2, RE3, PAN]; the teacher declares
+        # [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3, NIR_BROAD].
+        "teacher_band_indices": [0, 1, 2, 4, 5, 6, 3],
+    },
+}
 
 
 def build_teacher_model(backbone="terramind_v1_tiny", num_classes=11, ckpt_path=None):
@@ -110,15 +134,35 @@ def parse_args():
                    help="Test patches; default None = the full 25,323. Test runs once, "
                         "so it can afford to be thorough (snow/ice on 255 patches "
                         "instead of 14).")
-    p.add_argument("--target-domain", type=str, default="real", choices=["real", "sim"],
-                   help="Sensor the student must work on at deployment.")
-    p.add_argument("--source-domain", type=str, default="s2b", choices=["s2b"],
-                   help="Sensor the teacher is trusted on.")
+    p.add_argument("--target-domain", type=str, default=None,
+                   choices=["real", "sim", "real8", "sim8"],
+                   help="Sensor the student must work on at deployment. Defaults to "
+                        "whichever variant matches --student's channel contract.")
+    p.add_argument("--source-domain", type=str, default=None, choices=["s2b", "s2b8"],
+                   help="Sensor the teacher is trusted on. Defaults per --student.")
     p.add_argument("--no-augment", action="store_true",
                    help="Disable the joint geometric augmentation.")
     # teacher / student
     p.add_argument("--backbone", type=str, default="terramind_v1_tiny")
     p.add_argument("--teacher-ckpt", type=str, default=None)
+    p.add_argument("--student", type=str, default="unet", choices=["unet", "phisatnet"],
+                   help="Architecture to distil into. 'unet' is the 9.85M student the "
+                        "published runs use; 'phisatnet' is the 0.35M PhiSat-2 model, "
+                        "which also switches the data to its 8-band contract.")
+    p.add_argument("--student-pretrained", action="store_true",
+                   help="PhisatNet only: start from a published checkpoint instead of a "
+                        "random initialisation. OFF by default, because the UNet student "
+                        "has no pretrained weights available and a random init is what "
+                        "makes the two students' conditions differ only in architecture.")
+    p.add_argument("--student-ckpt-task", type=str, default="lc")
+    p.add_argument("--student-ckpt-training", type=str, default="finetuning",
+                   choices=["finetuning", "linear_probing"])
+    p.add_argument("--student-ckpt-nshots", type=int, default=5000)
+    p.add_argument("--student-ckpt-datetime", type=int, default=None,
+                   help="Pin a release date; the published encoders differ between "
+                        "releases, so leave this set for anything reproducible.")
+    p.add_argument("--student-weights-dir", type=str,
+                   default="/shared/home/elucas/scratch/terra-sat-drift/weights/hydranet")
     # loss weights
     p.add_argument("--w-task-target", type=float, default=1.0)
     p.add_argument("--w-task-source", type=float, default=1.0)
@@ -160,6 +204,13 @@ def parse_args():
     p.add_argument("--label-smoothing", type=float, default=0.0,
                    help="Label smoothing for instance contrastive loss (default 0.0 = none).")
     # architecture
+    p.add_argument("--concat-batch", action="store_true",
+                   help="Forward both sensors as one concatenated batch so a SHARED "
+                        "BatchNorm sees a mixed batch. This is the control for --use-dsbn: "
+                        "with separate passes and shared BatchNorm the two domains are "
+                        "normalised by their own batch statistics in training but by a "
+                        "blend of both at inference, and this removes that inconsistency. "
+                        "Mutually exclusive with --use-dsbn.")
     p.add_argument("--use-dsbn", action="store_true",
                    help="Domain-specific BatchNorm in the student (Chang et al. 2019).")
     # logging
@@ -174,9 +225,40 @@ def main():
     args = parse_args()
     seed_everything(42)
 
+    spec = STUDENT_SPECS[args.student]
+    # Explicit flags win, but a domain whose channel count the student cannot
+    # consume is a silent corruption rather than an error, so it is refused here.
+    target_domain = args.target_domain or spec["target_domain"]
+    source_domain = args.source_domain or spec["source_domain"]
+    eight_band = {"real8", "sim8", "s2b8"}
+    if (target_domain in eight_band) != (spec["in_channels"] == 8):
+        raise SystemExit(
+            f"--student {args.student} takes {spec['in_channels']} channels, which does "
+            f"not match --target-domain {target_domain}. Use "
+            f"{spec['target_domain']}/{spec['source_domain']}, or leave both unset."
+        )
+    if (source_domain in eight_band) != (spec["in_channels"] == 8):
+        raise SystemExit(
+            f"--student {args.student} takes {spec['in_channels']} channels, which does "
+            f"not match --source-domain {source_domain}."
+        )
+
+    # The teacher checkpoint goes in the tag. Several teachers live side by side
+    # under one directory as `best-val_mIoU.ckpt`, `-v6`, and so on, and they are
+    # not the same model: measured on the test split they differ by ~0.07 mIoU.
+    # A run tagged only by its loss weights gives no way to tell from the output
+    # directory which teacher produced it, and a student distilled from the wrong
+    # one looks like a worse method rather than a worse experiment.
+    teacher_tag = Path(args.teacher_ckpt).stem if args.teacher_ckpt else "noteacher"
     tag = args.run_name or (
-        f"xsensor_kd_{args.backbone}_kd{args.w_kd}_inst{args.w_instance}"
+        f"xsensor_kd_{args.student}_{args.backbone}_kd{args.w_kd}_inst{args.w_instance}"
         f"_pix{args.w_pixel}{'_dsbn' if args.use_dsbn else ''}"
+        f"{'_pre' if (args.student == 'phisatnet' and args.student_pretrained) else ''}"
+        # The label budget too, for the same reason as the teacher: the
+        # label-scarcity arm and the full-budget arm are different experiments
+        # and must not land in one directory.
+        f"_n{args.max_samples if args.max_samples else 'full'}"
+        f"_T-{teacher_tag}"
     )
     output_dir = Path("/shared/home/elucas/scratch/terra-sat-drift/outputs") / tag
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -197,8 +279,8 @@ def main():
         max_samples=args.max_samples,
         val_max_samples=args.val_max_samples,
         test_max_samples=args.test_max_samples,
-        target_domain=args.target_domain,
-        source_domain=args.source_domain,
+        target_domain=target_domain,
+        source_domain=source_domain,
     )
 
     # ---------------------------------------------------------
@@ -211,8 +293,34 @@ def main():
         backbone=args.backbone, num_classes=num_classes, ckpt_path=args.teacher_ckpt
     )
 
-    print("Building student (UNet)...")
-    student = create_student_model(in_channels=7, num_classes=num_classes, pretrained=False)
+    if args.student == "unet":
+        print("Building student (UNet)...")
+        student = create_student_model(in_channels=7, num_classes=num_classes,
+                                       pretrained=False)
+    else:
+        checkpoint = None
+        if args.student_pretrained:
+            checkpoint = resolve_checkpoint(
+                task=args.student_ckpt_task,
+                training=args.student_ckpt_training,
+                n_shots=args.student_ckpt_nshots,
+                datetime=args.student_ckpt_datetime,
+                weights_dir=args.student_weights_dir,
+            )
+        print(f"Building student (PhisatNet, "
+              f"{'pretrained' if checkpoint else 'random init'})...")
+        student = create_phisatnet_student(
+            num_classes=num_classes,
+            checkpoint=checkpoint,
+            in_channels=spec["in_channels"],
+            # Distillation trains the whole student, so nothing is frozen and the
+            # BatchNorm mode is inert -- DSBN, if enabled, is applied by the task
+            # module after this returns.
+            freeze="none",
+            reinit_decoder=not args.student_pretrained,
+        )
+    n_params = sum(q.numel() for q in student.parameters())
+    print(f"  student parameters: {n_params/1e6:.3f}M")
 
     # ---------------------------------------------------------
     # 3. Task
@@ -231,10 +339,17 @@ def main():
         w_crd=args.w_crd,
         task_loss=args.task_loss,
         focal_gamma=args.focal_gamma,
+        # `.tolist()`, not the raw numpy array: `save_hyperparameters` stores this
+        # in every checkpoint, and torch >= 2.6 loads with weights_only=True by
+        # default, which refuses to unpickle numpy objects. Passing the array
+        # makes every checkpoint this script writes unloadable via `ckpt_path=`,
+        # which is why the earlier KD runs could only ever be tested on their
+        # final-epoch weights. `train_baseline_phisat2.py` already carried this
+        # fix; the KD path did not.
         class_weights=(
             None if args.class_weights == "none"
             else class_weights(WC_CLASS_PIXEL_FREQ, scheme=args.class_weights,
-                               beta=args.class_weight_beta)
+                               beta=args.class_weight_beta).tolist()
         ),
         kd_mode=args.kd_mode,
         kd_temperature=args.kd_temperature,
@@ -251,8 +366,12 @@ def main():
         max_pixels_per_class=args.max_pixels_per_class,
         contrastive_warmup_epochs=args.contrastive_warmup_epochs,
         use_dsbn=args.use_dsbn,
+        concat_batch=args.concat_batch,
         ignore_index=-1,
-        student_in_channels=7,
+        student_in_channels=spec["in_channels"],
+        teacher_band_indices=spec["teacher_band_indices"],
+        # Blue, Green, Red are the first three channels in every domain served
+        # here, 7-band and 8-band alike.
         rgb_band_indices=(2, 1, 0),
         num_samples_to_log=args.num_samples_to_log,
         log_every_n_epochs=args.log_every_n_epochs,

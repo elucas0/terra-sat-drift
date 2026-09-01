@@ -48,6 +48,8 @@ def simulate_sen1floods_s2(
     simulation_steps: Optional[dict] = None,
     processing_level: ProcessingLevels = ProcessingLevels.L1C,
     verbose: bool = False,
+    config: Optional[SimulationConfig] = None,
+    workers: int = 1,
 ):
     """Simulate Sen1Floods11 S2 files through Φ-sat-2 pipeline using the dataset loader.
 
@@ -57,8 +59,14 @@ def simulate_sen1floods_s2(
         split: Dataset split - train, valid, or test.
         max_files: Maximum number of files to process. If None, processes all.
         simulation_steps: Dict with step names and boolean flags. If None, uses defaults.
-        processing_level: L1A, L1B, or L1C.
+            Ignored when ``config`` is given.
+        processing_level: L1A, L1B, or L1C. Ignored when ``config`` is given.
         verbose: Enable verbose logging.
+        config: Fully specified simulation configuration. When None (the default), the
+            historical hard-coded configuration is rebuilt from ``simulation_steps`` and
+            ``processing_level``. Callers sweeping the noise parameters (see
+            ``degradation_ladder.py``) pass their own instance instead.
+        workers: Number of parallel EOExecutor workers.
 
     """
     # Setup
@@ -112,23 +120,27 @@ def simulate_sen1floods_s2(
             "reflectance_conversion": True
         }
 
-    steps_obj = SimulationSteps(**simulation_steps)
-    snr_values = [5, 10]
+    if config is None:
+        steps_obj = SimulationSteps(**simulation_steps)
+        snr_values = [5, 10]
 
-    # Create simulation config and pipeline
-    config = SimulationConfig(
-        bands_names=bands,
-        source_resolution=10.0,
-        steps=steps_obj,
-        processing_level=processing_level,
-        # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
-        snr_psf_method="alternative",  # "alternative" or "executable"
-        misalignment_std_sea=6,
-        misalignment_std_land=3,
-        snr_values=snr_values,
-        psf_kernel_sigma=4.0,
-        radiance_reference=10000,
-    )
+        # Create simulation config and pipeline
+        config = SimulationConfig(
+            bands_names=bands,
+            source_resolution=10.0,
+            steps=steps_obj,
+            processing_level=processing_level,
+            # phisat2_exec_path="/shared/home/elucas/scratch/terra-sat-drift/executables/phisat2_unix.bin",
+            snr_psf_method="alternative",  # "alternative" or "executable"
+            misalignment_std_sea=6,
+            misalignment_std_land=3,
+            snr_values=snr_values,
+            psf_kernel_sigma=4.0,
+            radiance_reference=10000,
+        )
+    else:
+        steps_obj = config.steps
+        processing_level = config.processing_level
 
     logger.info(f"Simulation steps: {steps_obj.as_dict()}")
     logger.info(f"Processing level: {processing_level.value}")
@@ -140,7 +152,7 @@ def simulate_sen1floods_s2(
         num_samples=num_samples_to_process,
         output_dir=output_dir,
         logs_folder=output_dir / "v1.1/logs",
-        workers=1,
+        workers=workers,
         save_logs=True,
         verbose=verbose,
         logger=logger,
