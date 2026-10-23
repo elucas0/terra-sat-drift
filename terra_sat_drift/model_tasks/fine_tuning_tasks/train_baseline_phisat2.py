@@ -38,7 +38,7 @@ from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES, WC_CLASS_PIXEL_F
 from dataset.datamodule_paired_triplets_lulc import PhisatPairedLULCDataModule
 from model_tasks.baseline_module import SupervisedSegmentationModule
 from model_tasks.losses.segmentation import class_weights
-from student_mobilenet import create_student_model
+from model_tasks.student_mobilenet import create_student_model
 
 DATA = Path("/shared/projects/phisat2/data/processed")
 

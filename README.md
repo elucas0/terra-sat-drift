@@ -1,41 +1,80 @@
 # TerraSat Drift
 
-TerraSat Drift is a reproducible pipeline for analyzing drift between paired Earth observation TIFF files using TerraMind backbones from `terratorch`.
-
-It compares inputs at three levels:
-
-- Spectral drift: band-level summary statistics across S2 bands.
-- Embedding drift: encoder feature similarity and reconstruction-style error metrics.
-- Classification drift: class stability, confidence changes, and class-flip rates.
-
-Each run exports a timestamped JSON report in `experiments/`.
+TerraSat Drift is a research project for analyzing domain gap and data drift between real and simulated satellite imagery using [terratorch](https://github.com/IBM/terratorch) backbones (TerraMind). It covers the full pipeline from dataset simulation through model training to drift analysis.
 
 ## Repository Layout
 
 ```text
 .
-├── main.py                      # CLI entrypoint
+├── main.py / run.py                          # Entrypoints
 ├── terra_sat_drift/
-│   ├── model_service.py         # TerraMind model creation and inference helpers
-│   ├── drift_analysis.py        # Drift computations for single pairs and folders
-│   ├── reporting.py             # Console report formatting
-│   └── pipeline.py              # End-to-end orchestration and JSON export
-├── tiff_folder/                 # Input TIFF folders
-├── experiments/                 # Generated drift_results_*.json files
-├── docs/                        # MkDocs project documentation
-└── mkdocs.yml                   # Docs site config
+│   ├── data_simulation/                      # Terratorch dataset simulation
+│   │   ├── simulation_pipeline.py            #   End-to-end simulation orchestration
+│   │   ├── simulation_config.py              #   Simulation parameters
+│   │   ├── simulation_triplets.py            #   Triplet generation (real / simulated / label)
+│   │   ├── degradation_ladder.py             #   Progressive degradation levels
+│   │   ├── batch_simulate_sen1floods.py      #   Sen1Floods11 batch simulation
+│   │   ├── batch_simulate_hls_burn_scars.py  #   HLS Burn Scars batch simulation
+│   │   ├── phisat2_constants.py              #   φ-Sat-2 sensor constants
+│   │   ├── phisat2_utils.py                  #   φ-Sat-2 simulation helpers
+│   │   └── utils/                            #   Loaders, resampling, sanity checks
+│   │
+│   ├── dataset/                              # Datamodules & dataset definitions
+│   │   ├── datamodule_*_triplets_lulc.py     #   Lightning DataModules (paired, S2B, real)
+│   │   ├── dataset_*_triplets_lulc.py        #   Dataset classes (paired, S2B, base)
+│   │   ├── constants.py                      #   Band names, class maps, normalisation stats
+│   │   └── plot_utils.py                     #   Visualisation helpers
+│   │
+│   ├── drift_analysis/                       # Domain gap & data drift analysis
+│   │   ├── drift_analysis.py                 #   Core drift metrics
+│   │   ├── drift_pipeline.py                 #   Drift computation pipeline
+│   │   ├── spectral_utils.py                 #   Band-level spectral statistics
+│   │   ├── classification_drift_analyzer.py  #   Class stability & confidence drift
+│   │   ├── segmentation_drift_analyzer.py    #   Segmentation-level drift
+│   │   ├── sen1floods_drift_loader.py        #   Sen1Floods-specific drift loader
+│   │   ├── reporting.py                      #   Console & JSON report formatting
+│   │   ├── visualize_triplets_lulc.py        #   Triplet overlay visualisations
+│   │   ├── plot_degradation_ladder_grid.py   #   Degradation ladder plots
+│   │   ├── *.ipynb                           #   Analysis notebooks (embeddings, domain gap)
+│   │   ├── figures/                          #   Generated figures (histograms, PDFs)
+│   │   └── triplet_viz/                      #   Triplet overlay PNGs
+│   │
+│   └── model_tasks/                          # Train / test / validation scripts & modules
+│       ├── baseline_module.py                #   Baseline Lightning module
+│       ├── kd_module.py                      #   Knowledge-distillation module
+│       ├── kd_contrastive_module.py          #   KD + contrastive learning module
+│       ├── student_mobilenet.py              #   UNet student model definition
+│       ├── phisatnet_student.py              #   PhisatNet student model definition
+│       ├── losses/                           #   Loss functions (segmentation, contrastive)
+│       ├── fine_tuning_tasks/                #   Training entry-points & notebooks
+│       │   ├── kd_lulc.py                    #     KD training (TerraMind → UNet)
+│       │   ├── kd_lulc_contrastive.py        #     Cross-sensor contrastive KD
+│       │   ├── finetune_floods_student.py    #     Student flood-seg transfer probe
+│       │   ├── finetune_floods_terramind.py  #     TerraMind flood-seg fine-tune
+│       │   ├── train_baseline_phisat2.py     #     No-KD control baseline
+│       │   ├── train_phisatnet_lulc.py       #     PhisatNet frozen-encoder LULC probe
+│       │   ├── pretrain_lulc.py              #     TerraMind LULC pretraining
+│       │   ├── pretrain_ssl.py               #     MAE-style SSL pretraining
+│       │   ├── batch_probe_ladder.py         #     Degradation-ladder sweep orchestrator
+│       │   ├── train_validate_floods*.py     #     Flood training scripts (real & simulated)
+│       │   └── *.ipynb                       #     Training / inference notebooks
+│       ├── decoder_tasks/                    #   Decoder-head training scripts
+│       └── domain_adaptation/                #   MMD, DSBN & domain-adaptation training
+│
+├── scripts/                                  # Standalone utility scripts
+├── notebooks/                                # Exploration & comparison notebooks
+├── experiments/                              # Generated drift result JSONs
+├── executables/                              # φ-Sat-2 simulator binaries (per-platform)
+├── docs/                                     # MkDocs project documentation
+└── mkdocs.yml                                # Docs site config
 ```
 
 ## Requirements
 
-- Python `>=3.11`
-- Dependencies listed in `pyproject.toml`:
-	- `terratorch>=1.2.4`
-	- `torchgeo>=0.7.0`
+- Python ≥ 3.11
+- Dependencies, see [pyproject.toml](pyproject.toml)
 
 ## Installation
-
-Using `venv` + `pip`:
 
 ```bash
 python -m venv .venv
@@ -43,86 +82,17 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-If you use `uv`, install from the project root with your preferred `uv` workflow.
-
-## Usage
-
-Run with defaults:
+Or with `uv`:
 
 ```bash
-python main.py
+uv sync
 ```
 
-Run with explicit backbone and folder settings:
-
-```bash
-python main.py \
-	--backbone-size large \
-	--num-classes 10 \
-	--embedding-raw-dir tiff_folder/raw_tiff_update \
-	--embedding-simulated-dir tiff_folder/simulated_custom_l2_tiff \
-	--classification-raw-dir tiff_folder/raw_tiff_update \
-	--classification-simulated-dir tiff_folder/simulated_custom_tiff \
-	--file1-pattern BANDS_RES-GRID \
-	--file2-pattern PHISAT2-BANDS-GRID \
-	--suffix .tiff
-```
-
-### CLI Parameters
-
-- `--backbone-size {tiny,small,base,large}`
-- `--num-classes INT`
-- `--embedding-raw-dir PATH`
-- `--embedding-simulated-dir PATH`
-- `--classification-raw-dir PATH`
-- `--classification-simulated-dir PATH`
-- `--file1-pattern TEXT`
-- `--file2-pattern TEXT`
-- `--suffix TEXT`
-
-## Output Reports
-
-After each run, a JSON report is written to:
-
-- `experiments/drift_results_YYYYMMDD_HHMMSS.json`
-
-Report structure includes:
-
-- `metadata`: run configuration and matching rules.
-- `example_1`: detailed single-pair drift result.
-- `example_2`: folder-level embedding summary metrics.
-- `example_3`: folder-level classification summary metrics.
-
-## Backbone Notes
-
-The project supports TerraMind sizes:
-
-- `tiny`
-- `small`
-- `base`
-- `large`
-
-Each size uses the corresponding encoder neck indices internally.
-
-## Documentation Site
+## Documentation
 
 Project docs are under `docs/` and built with MkDocs.
 
-Serve locally:
-
 ```bash
-mkdocs serve
+mkdocs serve   # local dev server
+mkdocs build   # static site
 ```
-
-Build static site:
-
-```bash
-mkdocs build
-```
-
-Key docs pages:
-
-- `docs/getting-started.md`
-- `docs/cli-reference.md`
-- `docs/experiments.md`
-- `docs/results-json-format.md`

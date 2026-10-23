@@ -100,7 +100,7 @@ def parse_args():
 
 def catalog_candidates() -> list[str]:
     sys.path.insert(0, str(_REPO / "terra_sat_drift"))
-    from phisatnet_student import _ensure_hydranet_importable
+    from model_tasks.phisatnet_student import _ensure_hydranet_importable
 
     _ensure_hydranet_importable()
     from hydranet.weights import _load_catalog

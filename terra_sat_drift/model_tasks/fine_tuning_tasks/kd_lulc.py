@@ -13,7 +13,7 @@ from lightning.pytorch.loggers import WandbLogger
 from terratorch.models.encoder_decoder_factory import EncoderDecoderFactory
 
 # Import your custom modules
-from student_mobilenet import create_student_model
+from model_tasks.student_mobilenet import create_student_model
 from model_tasks.kd_module import KDSegmentationModule
 from dataset.datamodule_real_triplets_lulc import PhisatRealLULCDataModule
 from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES

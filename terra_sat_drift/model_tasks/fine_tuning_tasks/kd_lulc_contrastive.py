@@ -34,8 +34,8 @@ from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES, WC_CLASS_PIXEL_F
 from model_tasks.losses.segmentation import class_weights
 from dataset.datamodule_paired_triplets_lulc import PhisatPairedLULCDataModule
 from model_tasks.kd_contrastive_module import CrossSensorKDModule
-from student_mobilenet import create_student_model
-from phisatnet_student import create_phisatnet_student, resolve_checkpoint
+from model_tasks.student_mobilenet import create_student_model
+from model_tasks.phisatnet_student import create_phisatnet_student, resolve_checkpoint
 
 warnings.filterwarnings("ignore")
 

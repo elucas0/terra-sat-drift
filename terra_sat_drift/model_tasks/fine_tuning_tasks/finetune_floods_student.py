@@ -68,7 +68,7 @@ from dataset.dataset_paired_triplets_lulc import DOMAIN_STATS, normalize_domain
 from model_tasks.baseline_module import SupervisedSegmentationModule
 from model_tasks.domain_adaptation.dsbn import convert_to_dsbn, set_domain
 from model_tasks.losses.segmentation import class_weights
-from student_mobilenet import create_student_model
+from model_tasks.student_mobilenet import create_student_model
 
 warnings.filterwarnings("ignore")
 

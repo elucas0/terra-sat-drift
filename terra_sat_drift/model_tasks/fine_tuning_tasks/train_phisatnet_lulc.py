@@ -68,7 +68,7 @@ from dataset.constants import WC_CLASS_MAPPING, WC_CLASS_NAMES, WC_CLASS_PIXEL_F
 from dataset.datamodule_paired_triplets_lulc import PhisatPairedLULCDataModule
 from model_tasks.baseline_module import SupervisedSegmentationModule
 from model_tasks.losses.segmentation import class_weights
-from phisatnet_student import create_phisatnet_student, resolve_checkpoint
+from model_tasks.phisatnet_student import create_phisatnet_student, resolve_checkpoint
 
 DATA = Path("/shared/projects/phisat2/data/processed")
 DEFAULT_WEIGHTS_DIR = Path("/shared/home/elucas/scratch/terra-sat-drift/weights/hydranet")

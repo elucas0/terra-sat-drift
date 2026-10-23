@@ -1,106 +1,61 @@
 # Sen1Floods11 S2 Simulation Guide
 
-This guide explains how to use the Sen1Floods11 S2 loader and batch simulation scripts to prepare Sentinel-2 data from the Sen1Floods11 dataset for Φ-sat-2 simulation.
+This guide explains how to simulate Φ-sat-2 observations from Sentinel-2 data in the **Sen1Floods11** dataset using the `terra_sat_drift.data_simulation` pipeline.
+
+The simulation synthesises the spatial, spectral, and radiometric characteristics of the onboard Φ-sat-2 imager: spatial resampling to 4.75 m resolution, panchromatic (PAN) band synthesis, inter-band spatial misalignment, sensor noise (SNR), and optical blur (PSF).
+
+---
 
 ## Dataset Structure
 
-The Sen1Floods11 dataset is organized as follows:
+The pipeline expects the standard **Sen1Floods11 v1.1** directory layout:
 
-```
+```text
 datasets/sen1floods11/
 └── v1.1/
     ├── data/
     │   └── flood_events/
     │       └── HandLabeled/
-    │           ├── S1Hand/          # Sentinel-1 SAR data
-    │           ├── S2Hand/          # Sentinel-2 optical data (TARGET FOR SIMULATION)
-    │           ├── LabelHand/       # Flood labels/masks
-    │           ├── JRCWaterHand/    # JRC water masks
-    │           └── S1OtsuLabelHand/ # Otsu labels
+    │           ├── S1Hand/          # Sentinel-1 SAR imagery
+    │           ├── S2Hand/          # Sentinel-2 L1C optical GeoTIFFs (source for simulation)
+    │           ├── LabelHand/       # Ground-truth flood masks (10 m)
+    │           ├── JRCWaterHand/    # JRC permanent water masks
+    │           └── S1OtsuLabelHand/ # Otsu thresholded masks
     ├── splits/
     │   └── flood_handlabeled/
-    │       ├── flood_train_data.csv         # Train split
-    │       ├── flood_valid_data.csv         # Validation split
-    │       ├── flood_test_data.csv          # Test split
-    │       └── flood_bolivia_data.csv       # Bolivia-specific split
-    └── Sen1Floods11_Metadata.geojson        # Metadata with dates and locations
+    │       ├── flood_train_data.csv         # Train split filenames
+    │       ├── flood_valid_data.csv         # Validation split filenames
+    │       ├── flood_test_data.csv          # Test split filenames
+    │       └── flood_bolivia_data.csv       # Bolivia regional test split
+    └── Sen1Floods11_Metadata.geojson        # Scene coordinates and acquisition dates
 ```
 
-## Components
+---
 
-### 1. `sen1floods11_loader.py`
+## Key Components
 
-**Class: `Sen1Floods11S2Loader`**
+### 1. `batch_simulate_sen1floods.py`
 
-A data loader that extracts and manages S2 file paths from the Sen1Floods11 dataset.
+Located at: [`terra_sat_drift/data_simulation/batch_simulate_sen1floods.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/batch_simulate_sen1floods.py)
 
-#### Features:
-- Load S2 files from any split (train, val, test)
-- Iterate over files or get complete file lists
-- Load individual files as numpy arrays
-- Batch loading support
-- Metadata extraction (shape, dtype, profile)
-- Location name extraction from filenames
+Orchestrates batch simulation over a chosen split (`train`, `valid`, or `test`).
+It loads samples via `terratorch.datasets.Sen1Floods11NonGeo`, builds the `eo-learn` task graph via `simulate_with_executor`, and executes parallel synthesis.
 
-#### Usage:
+#### Python API:
 
 ```python
-from terra_sat_drift.sen1floods11_loader import Sen1Floods11S2Loader
+from pathlib import Path
+from terra_sat_drift.data_simulation.phisat2_constants import ProcessingLevels
+from terra_sat_drift.data_simulation.batch_simulate_sen1floods import simulate_sen1floods_s2
 
-# Initialize loader
-loader = Sen1Floods11S2Loader(
-    root_path="datasets/sen1floods11",
-    split="train",                    # train, valid, or test
-    dataset_type="HandLabeled"        # HandLabeled or WeaklyLabeled
-)
-
-# Get all S2 file paths
-s2_files = loader.get_s2_files()
-print(f"Total S2 files: {len(s2_files)}")
-
-# Load a single file
-s2_data = loader.load_s2_file(0)  # Shape: (bands, height, width)
-print(f"S2 shape: {s2_data.shape}")
-
-# Get metadata
-metadata = loader.load_s2_metadata(0)
-print(f"Bands: {metadata['count']}")
-
-# Batch loading
-batch = loader.load_batch([0, 1, 2, 3, 4], return_paths=True)
-print(f"Loaded {len(batch['data'])} files")
-
-# Iterate over files
-for s2_file in loader:
-    print(s2_file.name)
-```
-
-### 2. `batch_simulate_sen1floods.py`
-
-**Function: `simulate_sen1floods_s2()`**
-
-Orchestrates batch simulation of S2 files through the Φ-sat-2 pipeline.
-
-#### Features:
-- Batch process all S2 files from a split
-- Configurable simulation steps
-- Progress tracking and logging
-- Error handling with detailed reports
-- Results saved to JSON format
-- Support for all processing levels (L1A, L1B, L1C)
-
-#### Usage as Python API:
-
-```python
-from terra_sat_drift.batch_simulate_sen1floods import simulate_sen1floods_s2
-
-results = simulate_sen1floods_s2(
-    dataset_root="datasets/sen1floods11",
-    output_dir="tiff_folder/simulated_sen1floods",
-    split="train",                    # train, valid, or test
-    dataset_type="HandLabeled",
-    max_files=10,                     # Limit to 10 files (optional)
+simulate_sen1floods_s2(
+    dataset_root="/path/to/sen1floods11",
+    output_dir="/path/to/simulated_sen1floods",
+    split="train",                              # "train", "val", "valid", or "test"
+    max_files=10,                               # Optional int to limit samples (None = all)
+    processing_level=ProcessingLevels.L1C,       # ProcessingLevels.L1A, L1B, or L1C
     simulation_steps={
+        "spatial_resampling": True,
         "radiance": True,
         "add_panchromatic": True,
         "band_misalignment": True,
@@ -108,208 +63,138 @@ results = simulate_sen1floods_s2(
         "psf_filtering": True,
         "reflectance_conversion": True,
     },
-    processing_level="L1C",
+    workers=4,
     verbose=True,
 )
-
-print(f"Successful: {len(results['successful'])}")
-print(f"Failed: {len(results['failed'])}")
 ```
+
+#### Parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset_root` | `Path \| str` | *required* | Root path containing the `v1.1/` dataset folder |
+| `output_dir` | `Path \| str` | *required* | Destination root where simulated dataset structure is mirrored |
+| `split` | `str` | `"train"` | Dataset split (`"train"`, `"valid"`, `"val"`, or `"test"`) |
+| `max_files` | `int \| None` | `None` | Max samples to process (`None` processes all in split) |
+| `simulation_steps` | `dict \| None` | `None` | Dict mapping step names to boolean flags (defaults to all `True`) |
+| `processing_level` | `ProcessingLevels` | `ProcessingLevels.L1C` | Output radiometric level (`L1A`, `L1B`, or `L1C`) |
+| `verbose` | `bool` | `False` | Enable debug logging |
+| `config` | `SimulationConfig \| None` | `None` | Pre-configured `SimulationConfig` object (used by sweeps like `degradation_ladder.py`) |
+| `workers` | `int` | `1` | Number of parallel worker threads in `EOExecutor` |
 
 #### Command-Line Usage:
 
 ```bash
-# Basic usage (process entire train split)
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_sen1floods \
-    --split train
-
-# Process validation split with limited files
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_sen1floods \
+# Basic simulation of the validation split (runs from project root)
+python terra_sat_drift/data_simulation/batch_simulate_sen1floods.py \
+    --dataset-root /path/to/datasets/sen1floods11 \
+    --output-dir /path/to/output/simulated_sen1floods \
     --split valid \
-    --max-files 50
-
-# Process with specific simulation steps disabled
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_sen1floods \
-    --split test \
     --processing-level L1C \
-    --disable-snr \
-    --disable-psf \
     --verbose
 
-# Help
-python -m terra_sat_drift.batch_simulate_sen1floods --help
+# Quick test with only 5 files and no noise simulation
+python terra_sat_drift/data_simulation/batch_simulate_sen1floods.py \
+    --dataset-root /path/to/datasets/sen1floods11 \
+    --output-dir /path/to/output/simulated_sen1floods \
+    --split test \
+    --max-files 5 \
+    --disable-snr \
+    --disable-psf
 ```
 
-#### Command-Line Arguments:
+#### CLI Options:
 
-| Argument | Type | Default | Description |
-|----------|------|---------|-------------|
-| `--dataset-root` | Path | `datasets/sen1floods11` | Path to sen1floods dataset |
-| `--output-dir` | Path | `tiff_folder/simulated_sen1floods` | Output directory for simulated files |
-| `--split` | str | `train` | Dataset split (train/val/valid/test) |
-| `--dataset-type` | str | `HandLabeled` | Dataset type |
-| `--max-files` | int | None | Max files to process (None = all) |
-| `--processing-level` | str | `L1C` | Output level (L1A/L1B/L1C) |
-| `--disable-radiance` | flag | - | Disable radiance conversion |
-| `--disable-pan` | flag | - | Disable PAN band addition |
-| `--disable-misalignment` | flag | - | Disable band misalignment |
-| `--disable-snr` | flag | - | Disable SNR simulation |
-| `--disable-psf` | flag | - | Disable PSF filtering |
-| `--disable-reflectance` | flag | - | Disable reflectance conversion |
-| `--phisat2-path` | str | None | Path to phisat2 binary |
-| `-v, --verbose` | flag | - | Enable verbose logging |
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--dataset-root` | `Path` | `/shared/home/elucas/datasets/sen1floods11` | Source dataset root |
+| `--output-dir` | `Path` | `/shared/home/elucas/datasets/sen1floods11_simulated_alt_v2` | Output directory |
+| `--split` | `choice` | `"train"` | Split: `train`, `val`, `valid`, `test` |
+| `--max-files` | `int` | `None` | Maximum number of files to process |
+| `--processing-level` | `choice` | `"L1C"` | Target level: `L1A`, `L1B`, `L1C` |
+| `--disable-radiance` | flag | `False` | Skip reflectance-to-radiance conversion |
+| `--disable-pan` | flag | `False` | Skip PAN band generation |
+| `--disable-misalignment`| flag | `False` | Skip inter-band shift simulation |
+| `--disable-snr` | flag | `False` | Skip Gaussian SNR noise |
+| `--disable-psf` | flag | `False` | Skip PSF kernel blur |
+| `--disable-reflectance` | flag | `False` | Skip final radiance-to-reflectance conversion |
+| `-v, --verbose` | flag | `False` | Verbose logging |
 
-## Examples
+---
 
-### Example 1: Load and inspect S2 files
+### 2. `degradation_ladder.py`
 
-```python
-from terra_sat_drift.sen1floods11_loader import Sen1Floods11S2Loader
+Located at: [`terra_sat_drift/data_simulation/degradation_ladder.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/degradation_ladder.py)
 
-loader = Sen1Floods11S2Loader("datasets/sen1floods11", split="train")
+Generates systematic noise ladder datasets to evaluate model drift per isolated degradation factor across 4 severity levels:
+- **`snr`**: Signal-to-noise ratio sweeps (`[40, 80]` down to `[5, 10]`)
+- **`psf`**: Point Spread Function kernel sigma (`0.5` up to `4.0`)
+- **`misalign`**: Inter-band registration standard deviation (`1.25` up to `10.0`)
+- **`joint`**: All three factors simultaneously
 
-# Check what we have
-print(f"Training set: {len(loader)} images")
-for i, path in enumerate(loader.get_s2_files()[:5]):
-    print(f"  {i}: {path.name}")
-
-# Load and check first file
-data = loader.load_s2_file(0)
-print(f"Shape: {data.shape}, Dtype: {data.dtype}")
-print(f"Value range: {data.min():.1f} to {data.max():.1f}")
-```
-
-### Example 2: Run S2 simulation on a subset
-
-```python
-from terra_sat_drift.batch_simulate_sen1floods import simulate_sen1floods_s2
-
-# Simulate first 10 files from validation set with minimal steps
-results = simulate_sen1floods_s2(
-    dataset_root="datasets/sen1floods11",
-    output_dir="tiff_folder/test_sim",
-    split="valid",
-    max_files=10,
-    simulation_steps={
-        "radiance": True,
-        "add_panchromatic": False,  # Skip PAN
-        "band_misalignment": False,  # Skip misalignment
-        "snr_simulation": False,     # Skip SNR
-        "psf_filtering": False,      # Skip PSF
-        "reflectance_conversion": False,
-    },
-    processing_level="L1A",
-    verbose=True,
-)
-
-print(f"Results: {len(results['successful'])} OK, {len(results['failed'])} failed")
-```
-
-### Example 3: Full pipeline with all steps
+Each variant shares the identical deterministic backbone (radiance, PAN band, 4.75 m spatial resampling, L1C reflectance conversion) and differs *only* by the isolated factor under test.
 
 ```bash
-# Simulate entire training set with all processing steps
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_train \
-    --split train \
-    --processing-level L1C \
-    --verbose
+# Dry run to inspect the planned ladder without executing
+python terra_sat_drift/data_simulation/degradation_ladder.py --dry-run
 
-# Then process validation and test
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_val \
-    --split valid
-
-python -m terra_sat_drift.batch_simulate_sen1floods \
-    --dataset-root datasets/sen1floods11 \
-    --output-dir tiff_folder/simulated_test \
-    --split test
+# Run full ladder across train, val, and test splits with 4 workers
+python terra_sat_drift/data_simulation/degradation_ladder.py \
+    --dataset-root /path/to/sen1floods11 \
+    --output-root /path/to/ladder_output \
+    --splits train val test \
+    --workers 4
 ```
+
+---
+
+### 3. Utility Scripts (`data_simulation/utils/`)
+
+* **[`sen1floods11_loader.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/utils/sen1floods11_loader.py)**: Standalone `Sen1Floods11S2Loader` class for loading S2 files directly from split CSVs without requiring `terratorch` or multi-modal datasets. Useful for lightweight data inspection, plotting, and quick statistics.
+* **[`resample_labels.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/utils/resample_labels.py)**: Resamples original 10 m flood masks to Φ-sat-2's 4.75 m grid using nearest-neighbor interpolation to preserve class IDs.
+* **[`psf_utils.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/utils/psf_utils.py)**: Helper to construct Gaussian blur kernels for multi-spectral bands.
+* **[`fix_sen1floods_splits.py`](file:///home/elouann/terra-sat-drift/terra_sat_drift/data_simulation/utils/fix_sen1floods_splits.py)**: Strips modal suffixes from split text files to obtain clean root scene identifiers.
+
+---
 
 ## Output Structure
 
-After simulation, the output directory will contain:
+The simulation mirrors the Sen1Floods11 v1.1 structure so that the output can be loaded directly by standard dataset loaders (e.g., `Sen1Floods11NonGeo(data_root=output_dir)`):
 
-```
-tiff_folder/simulated_sen1floods/
-├── simulated_train/              # Simulated files for train split
-│   ├── simulated_Bolivia_103757_S2Hand.tif
-│   ├── simulated_Bolivia_129334_S2Hand.tif
-│   └── ...
-├── simulated_valid/              # Simulated files for validation split
-│   └── ...
-├── simulated_test/               # Simulated files for test split
-│   └── ...
-├── simulation_results_train.json
-├── simulation_results_valid.json
-├── simulation_results_test.json
-└── simulation.log
-```
-
-## Results Format
-
-Each `simulation_results_*.json` file contains:
-
-```json
-{
-  "successful": [
-    "/path/to/simulated_file1.tif",
-    "/path/to/simulated_file2.tif"
-  ],
-  "failed": [
-    "/path/to/failed_file1.tif"
-  ],
-  "metadata": {
-    "split": "train",
-    "dataset_type": "HandLabeled",
-    "processing_level": "L1C",
-    "total_files": 200,
-    "simulation_steps": {
-      "radiance": true,
-      "add_panchromatic": true,
-      "band_misalignment": true,
-      "snr_simulation": true,
-      "psf_filtering": true,
-      "reflectance_conversion": true
-    }
-  }
-}
+```text
+<output_dir>/
+└── v1.1/
+    ├── simulation_config.json                         # Serialized SimulationConfig
+    ├── logs/                                         # Execution log files
+    │   └── ...
+    └── data/
+        └── flood_events/
+            └── HandLabeled/
+                └── S2Hand/                            # Simulated GeoTIFFs
+                    ├── simulated_L1C_Bolivia_103757_S2Hand.tif
+                    ├── simulated_L1C_Bolivia_129334_S2Hand.tif
+                    └── ...
 ```
 
-## Performance Notes
+### Simulated Image Characteristics
 
-- **File I/O**: Each S2 file is typically 100-500 MB depending on resolution
-- **Processing time**: ~5-15 seconds per file on GPU (depending on simulation steps)
-- **Memory**: ~2-4 GB RAM for batch processing
-- **Disk space**: Simulated output is similar size to input
+* **Dimensions**: 1077 × 1077 pixels (resampled from 512 × 512 at 10 m)
+* **Spatial Resolution**: 4.75 m (native Φ-sat-2 GSD)
+* **Bands (8 total)**:
+  `[0: Blue, 1: Green, 2: Red, 3: PAN, 4: RE1, 5: RE2, 6: RE3, 7: NIR]`
+* **Data Type**: `float32` (reflectance values scaled 0–10,000)
 
-## Troubleshooting
+---
 
-### Missing S2 files
-If you see warnings about missing S2 files, ensure the dataset is properly structured with S2Hand directory containing all S2Hand.tif files.
+## Simulation Pipeline Tasks (`simulation_pipeline.py`)
 
-### Out of memory
-Reduce `max_files` parameter or process splits separately with smaller batches.
+The pipeline constructs an `eo-learn` `EOWorkflow` chaining the following tasks:
 
-### Slow performance
-Disable unnecessary simulation steps or check GPU availability for accelerated processing.
-
-## Integration with Simulation Pipeline
-
-The scripts use the `SimulationPipeline` class which wraps Φ-sat-2 processing tasks:
-
-1. **Radiance conversion**: DN → radiance (if enabled)
-2. **PAN band addition**: Add synthetic panchromatic band (if enabled)
-3. **Band misalignment**: Simulate spectral registration errors (if enabled)
-4. **SNR + PSF**: Add noise and apply point-spread function (if enabled)
-5. **Reflectance conversion**: Radiance → reflectance for L1C (if enabled)
-
-Each step can be independently controlled via `SimulationSteps` configuration.
+1. **`LoadS2DatasetSampleTask`**: Ingests image tensor, spatial bbox, and temporal coordinates from the sample.
+2. **`CalculateRadianceTask`**: Converts reflectances to physical radiances based on earth-sun distance and solar zenith angle.
+3. **`AddPANBandTask`**: Computes synthetic panchromatic channel via weighted spectral combination and inserts it at index 3.
+4. **`ResamplingTask`**: Resamples from 10 m input resolution to 4.75 m grid using nearest-neighbor interpolation.
+5. **`BandMisalignmentTask`**: Simulates inter-band optical registration shifts via affine transformations (accounting for land vs. sea variance).
+6. **`AlternativePhisatCalculationTask`**: Adds Gaussian sensor noise according to target SNR range and applies 2D Gaussian PSF blur.
+7. **`CalculateReflectanceTask`**: Re-converts radiances back to reflectance for L1C outputs.
+8. **`ExportToTiffTask`**: Exports multi-band GeoTIFF to the output path. Intermediate features are automatically pruned to conserve memory.

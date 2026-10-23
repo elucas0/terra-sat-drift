@@ -82,7 +82,7 @@ import torch
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "terra_sat_drift"))
 
-from phisatnet_student import (  # noqa: E402
+from model_tasks.phisatnet_student import (  # noqa: E402
     BOTTLENECK_PREFIXES,
     DECODER_PREFIXES,
     ENCODER_PREFIXES,
